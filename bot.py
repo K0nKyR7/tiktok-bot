@@ -52,6 +52,7 @@ YOUTUBE_URL_REGEX = re.compile(
     r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)[a-zA-Z0-9_\-]+"
 )
 
+COOKIES_FILE = Path(__file__).resolve().parent / "cookies.txt"
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
 
 
@@ -132,6 +133,8 @@ def download_youtube_video(url: str, output_dir: str):
             }
         },
     }
+    if COOKIES_FILE.exists():
+        ydl_opts['cookiefile'] = str(COOKIES_FILE)
     if ffmpeg_exe:
         ydl_opts['ffmpeg_location'] = ffmpeg_exe
 
@@ -164,6 +167,8 @@ def download_youtube_audio(video_id: str, output_dir: str):
             }
         },
     }
+    if COOKIES_FILE.exists():
+        ydl_opts['cookiefile'] = str(COOKIES_FILE)
     if ffmpeg_exe:
         ydl_opts['ffmpeg_location'] = ffmpeg_exe
 
