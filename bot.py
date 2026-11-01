@@ -379,7 +379,7 @@ async def start_health_check_server():
     app = web.Application()
 
     async def handle_ping(request):
-        return web.Response(text="Bot is running!")
+        return web.Response(text="Bot is running! Version: v3-buttons-yt")
 
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
