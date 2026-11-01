@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -65,6 +66,25 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def get_ffmpeg_path() -> Optional[str]:
+    """Находит ffmpeg и гарантирует права на выполнение (особенно для Linux/Render)."""
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+    try:
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            try:
+                st = os.stat(exe)
+                os.chmod(exe, st.st_mode | 0o111)
+            except Exception:
+                pass
+            return exe
+    except Exception as e:
+        logger.warning(f"Не удалось получить ffmpeg из imageio: {e}")
+    return None
+
+
 def to_absolute_url(url: Optional[str]) -> Optional[str]:
     """Преобразует относительный путь TikWM в полный URL."""
     if not url:
@@ -97,17 +117,24 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 
 
 def download_youtube_video(url: str, output_dir: str):
-    """Синхронная функция скачивания YouTube-видео через yt-dlp."""
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    """Скачивание YouTube-видео через yt-dlp с поддержкой обхода блокировок."""
+    ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
-        'ffmpeg_location': ffmpeg_exe,
-        'format': 'bestvideo[height<=720][filesize_approx<38M]+bestaudio/bestvideo[height<=480][filesize_approx<42M]+bestaudio/best[height<=480]/best[height<=360]/best',
+        'format': 'bestvideo[height<=720][filesize_approx<38M]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio[ext=m4a]/18/best[ext=mp4]/best',
         'merge_output_format': 'mp4',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web']
+            }
+        },
     }
+    if ffmpeg_exe:
+        ydl_opts['ffmpeg_location'] = ffmpeg_exe
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         video_id = info.get("id")
@@ -123,15 +150,22 @@ def download_youtube_video(url: str, output_dir: str):
 def download_youtube_audio(video_id: str, output_dir: str):
     """Скачивание аудиодорожки с YouTube."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
-        'ffmpeg_location': ffmpeg_exe,
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web']
+            }
+        },
     }
+    if ffmpeg_exe:
+        ydl_opts['ffmpeg_location'] = ffmpeg_exe
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         expected_file = os.path.join(output_dir, f"{video_id}.m4a")
@@ -316,7 +350,7 @@ async def handle_youtube_link(message: types.Message):
 
     except Exception as e:
         logger.error(f"Ошибка при обработке YouTube: {e}", exc_info=True)
-        await status_msg.edit_text("⚠️ Не удалось скачать видео с YouTube. Проверьте ссылку или доступность ролика.")
+        await status_msg.edit_text(f"⚠️ Ошибка: {str(e)[:160]}")
 
 
 # --- Callback: Скачивание аудио TikTok ---
@@ -379,7 +413,7 @@ async def start_health_check_server():
     app = web.Application()
 
     async def handle_ping(request):
-        return web.Response(text="Bot is running! Version: v3-buttons-yt")
+        return web.Response(text="Bot is running! Version: v4-yt-fixed")
 
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
