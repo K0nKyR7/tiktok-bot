@@ -118,20 +118,15 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 
 
 def download_youtube_video(url: str, output_dir: str):
-    """Скачивание YouTube-видео через yt-dlp с мобильным клиентом Android (без блокировок)."""
+    """Скачивание YouTube-видео через yt-dlp с cookies."""
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
-        'format': '18/best[ext=mp4]/best',
+        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/18/best[ext=mp4]/best',
+        'merge_output_format': 'mp4',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios'],
-                'player_skip': ['web', 'web_safari']
-            }
-        },
     }
     if COOKIES_FILE.exists():
         ydl_opts['cookiefile'] = str(COOKIES_FILE)
@@ -151,7 +146,7 @@ def download_youtube_video(url: str, output_dir: str):
 
 
 def download_youtube_audio(video_id: str, output_dir: str):
-    """Скачивание аудиодорожки с YouTube через мобильный клиент Android."""
+    """Скачивание аудиодорожки с YouTube через cookies."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
@@ -160,12 +155,6 @@ def download_youtube_audio(video_id: str, output_dir: str):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios'],
-                'player_skip': ['web', 'web_safari']
-            }
-        },
     }
     if COOKIES_FILE.exists():
         ydl_opts['cookiefile'] = str(COOKIES_FILE)
