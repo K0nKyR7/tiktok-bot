@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +14,16 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import BufferedInputFile, FSInputFile, InputMediaPhoto
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
@@ -41,8 +51,18 @@ YOUTUBE_URL_REGEX = re.compile(
     r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)[a-zA-Z0-9_\-]+"
 )
 
-# Максимальный размер файла для Telegram (50 МБ)
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
+
+
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    """Главная клавиатура бота."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📖 Инструкция"), KeyboardButton(text="⚡️ Статус бота")],
+            [KeyboardButton(text="ℹ️ О боте")]
+        ],
+        resize_keyboard=True
+    )
 
 
 def to_absolute_url(url: Optional[str]) -> Optional[str]:
@@ -77,11 +97,10 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 
 
 def download_youtube_video(url: str, output_dir: str):
-    """Синхронная функция скачивания YouTube-видео через yt-dlp с контролем размера."""
+    """Синхронная функция скачивания YouTube-видео через yt-dlp."""
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     ydl_opts = {
         'ffmpeg_location': ffmpeg_exe,
-        # Подбираем лучшее качество, которое гарантированно поместится в лимит 50 МБ:
         'format': 'bestvideo[height<=720][filesize_approx<38M]+bestaudio/bestvideo[height<=480][filesize_approx<42M]+bestaudio/best[height<=480]/best[height<=360]/best',
         'merge_output_format': 'mp4',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
@@ -101,15 +120,82 @@ def download_youtube_video(url: str, output_dir: str):
         return info, expected_file
 
 
+def download_youtube_audio(video_id: str, output_dir: str):
+    """Скачивание аудиодорожки с YouTube."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ydl_opts = {
+        'ffmpeg_location': ffmpeg_exe,
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
+        'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        expected_file = os.path.join(output_dir, f"{video_id}.m4a")
+        if not os.path.exists(expected_file):
+            for f in os.listdir(output_dir):
+                if f.startswith(str(video_id)):
+                    expected_file = os.path.join(output_dir, f)
+                    break
+        return info, expected_file
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 **Привет!**\n\n"
-        "Я умею скачивать видео из **TikTok** и **YouTube** (включая Shorts)!\n\n"
-        "Просто отправь мне ссылку:\n"
-        "• **TikTok** (видео без водяного знака и фото-карусели)\n"
-        "• **YouTube / Shorts** (видео со звуком)",
+        "👋 **Добро пожаловать!**\n\n"
+        "Я бот для скачивания медиа из **TikTok** и **YouTube**!\n\n"
+        "📌 **Что я умею:**\n"
+        "• 🎬 **TikTok** — видео без водяного знака и фото-карусели\n"
+        "• 🎥 **YouTube & Shorts** — видео высокого качества со звуком\n"
+        "• 🎵 **Аудио** — скачивание треков и музыки в один клик\n\n"
+        "Просто отправь мне ссылку!",
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_main_keyboard(),
+    )
+
+
+# --- Кнопки главного меню ---
+@dp.message(F.text == "📖 Инструкция")
+async def btn_instruction(message: types.Message):
+    await message.answer(
+        "📖 **Инструкция по использованию:**\n\n"
+        "1. Скопируйте ссылку на видео в приложении или браузере:\n"
+        "   • TikTok (кнопка «Поделиться» ➔ «Ссылка»)\n"
+        "   • YouTube или Shorts (кнопка «Поделиться»)\n"
+        "2. Отправьте ссылку боту в этот чат.\n"
+        "3. Бот сразу обработает её и пришлет чистое видео!\n\n"
+        "💡 Под каждым видео будет кнопка **«🎵 Скачать аудио»** для сохранения трека.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.message(F.text == "⚡️ Статус бота")
+async def btn_status(message: types.Message):
+    start_t = time.time()
+    msg = await message.answer("🔄 Проверка связи...")
+    ping = round((time.time() - start_t) * 1000)
+    await msg.edit_text(
+        "🟢 **Бот работает стабильно 24/7!**\n\n"
+        f"⚡️ Отклик сервера: **{ping} мс**\n"
+        "☁️ Хостинг: **Render Cloud**\n"
+        "🛡 Загрузка: **TikTok + YouTube**\n"
+        "📦 Макс. размер: **50 МБ**",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@dp.message(F.text == "ℹ️ О боте")
+async def btn_about(message: types.Message):
+    await message.answer(
+        "ℹ️ **О боте:**\n\n"
+        "🤖 Бот скачивает ролики без водяных знаков и рекламы.\n"
+        "🚀 Быстрая загрузка благодаря облачному серверу.\n"
+        "✨ Поддерживает фото-карусели, обычные видео, Shorts и музыку.",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 
@@ -134,6 +220,14 @@ async def handle_tiktok_link(message: types.Message):
         title = data.get("title") or ""
         clean_title = (title[:180] + "...") if len(title) > 180 else title
         caption = f"🎬 {clean_title}" if clean_title else "🎬 TikTok видео"
+        video_id = data.get("id", "")
+
+        # Инлайн-кнопки под видео
+        buttons = []
+        if data.get("music"):
+            buttons.append([InlineKeyboardButton(text="🎵 Скачать аудио", callback_data=f"tta:{video_id}")])
+        buttons.append([InlineKeyboardButton(text="🔗 Открыть оригинал", url=tiktok_url)])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
         # 1. Фото-карусель
         images = data.get("images")
@@ -152,7 +246,7 @@ async def handle_tiktok_link(message: types.Message):
         video_url = to_absolute_url(raw_video_url)
 
         if not video_url:
-            await status_msg.edit_text("❌ Не найдена ссылка на скачивание без водяного знака.")
+            await status_msg.edit_text("❌ Не найдена ссылка на скачивание.")
             return
 
         headers = {
@@ -164,9 +258,9 @@ async def handle_tiktok_link(message: types.Message):
                 if resp.status == 200:
                     video_bytes = await resp.read()
                     video_file = BufferedInputFile(video_bytes, filename="tiktok_video.mp4")
-                    await message.reply_video(video=video_file, caption=caption)
+                    await message.reply_video(video=video_file, caption=caption, reply_markup=keyboard)
                 else:
-                    await message.reply_video(video=video_url, caption=caption)
+                    await message.reply_video(video=video_url, caption=caption, reply_markup=keyboard)
 
         await status_msg.delete()
 
@@ -183,7 +277,7 @@ async def handle_youtube_link(message: types.Message):
         return
 
     yt_url = match.group(0)
-    status_msg = await message.reply("⏳ Загружаю видео из YouTube, подождите немного...")
+    status_msg = await message.reply("⏳ Загружаю видео из YouTube, подождите...")
 
     try:
         await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
@@ -206,14 +300,78 @@ async def handle_youtube_link(message: types.Message):
             title = info.get("title") or "YouTube video"
             clean_title = (title[:180] + "...") if len(title) > 180 else title
             caption = f"🎬 {clean_title}"
+            vid_id = info.get("id", "")
 
-            video_file = FSInputFile(file_path, filename=f"youtube_{info.get('id')}.mp4")
-            await message.reply_video(video=video_file, caption=caption)
+            # Инлайн-кнопки под видео
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🎵 Скачать только аудио", callback_data=f"yta:{vid_id}")],
+                    [InlineKeyboardButton(text="🔗 Открыть на YouTube", url=yt_url)]
+                ]
+            )
+
+            video_file = FSInputFile(file_path, filename=f"youtube_{vid_id}.mp4")
+            await message.reply_video(video=video_file, caption=caption, reply_markup=keyboard)
             await status_msg.delete()
 
     except Exception as e:
         logger.error(f"Ошибка при обработке YouTube: {e}", exc_info=True)
         await status_msg.edit_text("⚠️ Не удалось скачать видео с YouTube. Проверьте ссылку или доступность ролика.")
+
+
+# --- Callback: Скачивание аудио TikTok ---
+@dp.callback_query(F.data.startswith("tta:"))
+async def callback_tiktok_audio(callback: CallbackQuery):
+    video_id = callback.data.split(":", 1)[1]
+    await callback.answer("⏳ Скачиваю аудио...")
+
+    try:
+        data = await fetch_tiktok_data(f"https://www.tiktok.com/@tiktok/video/{video_id}")
+        if not data or not data.get("music"):
+            await callback.message.reply("❌ Аудиодорожка не найдена.")
+            return
+
+        audio_url = to_absolute_url(data.get("music"))
+        music_info = data.get("music_info") or {}
+        track_title = music_info.get("title") or "Audio"
+        author = music_info.get("author") or "TikTok"
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.get(audio_url) as resp:
+                if resp.status == 200:
+                    audio_bytes = await resp.read()
+                    audio_file = BufferedInputFile(audio_bytes, filename=f"{track_title}.mp3")
+                    await callback.message.reply_audio(
+                        audio=audio_file,
+                        title=track_title,
+                        performer=author
+                    )
+    except Exception as e:
+        logger.error(f"Ошибка скачивания TikTok аудио: {e}")
+        await callback.message.reply("⚠️ Не удалось загрузить аудио.")
+
+
+# --- Callback: Скачивание аудио YouTube ---
+@dp.callback_query(F.data.startswith("yta:"))
+async def callback_youtube_audio(callback: CallbackQuery):
+    video_id = callback.data.split(":", 1)[1]
+    await callback.answer("⏳ Скачиваю аудио...")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            info, file_path = await asyncio.to_thread(download_youtube_audio, video_id, tmp_dir)
+            if file_path and os.path.exists(file_path):
+                title = info.get("title") or "Audio"
+                channel = info.get("uploader") or "YouTube"
+                audio_file = FSInputFile(file_path, filename=f"{title}.m4a")
+                await callback.message.reply_audio(
+                    audio=audio_file,
+                    title=title[:60],
+                    performer=channel[:60]
+                )
+    except Exception as e:
+        logger.error(f"Ошибка скачивания YouTube аудио: {e}")
+        await callback.message.reply("⚠️ Не удалось загрузить аудиодорожку.")
 
 
 async def start_health_check_server():
