@@ -118,19 +118,21 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 
 
 def download_youtube_video(url: str, output_dir: str):
-    """Скачивание YouTube-видео через yt-dlp с cookies и решением JS-челленджей (deno)."""
+    """Скачивание YouTube-видео через чистый мобильный Android API (формат 18 со звуком, без блокировок)."""
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
-        'format': 'bestvideo[height<=720][filesize_approx<38M]+bestaudio/bestvideo[height<=480]+bestaudio/18/best',
-        'merge_output_format': 'mp4',
+        'format': '18/best[ext=mp4]/best',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
-        'remote_components': ['ejs:github'],
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android'],
+                'player_skip': ['web', 'mweb', 'web_safari']
+            }
+        },
     }
-    if COOKIES_FILE.exists():
-        ydl_opts['cookiefile'] = str(COOKIES_FILE)
     if ffmpeg_exe:
         ydl_opts['ffmpeg_location'] = ffmpeg_exe
 
@@ -147,19 +149,22 @@ def download_youtube_video(url: str, output_dir: str):
 
 
 def download_youtube_audio(video_id: str, output_dir: str):
-    """Скачивание аудиодорожки с YouTube через cookies и deno."""
+    """Скачивание аудиодорожки с YouTube через Android API."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio/18/best',
+        'format': 'bestaudio[ext=m4a]/18/best',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
-        'remote_components': ['ejs:github'],
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android'],
+                'player_skip': ['web', 'mweb', 'web_safari']
+            }
+        },
     }
-    if COOKIES_FILE.exists():
-        ydl_opts['cookiefile'] = str(COOKIES_FILE)
     if ffmpeg_exe:
         ydl_opts['ffmpeg_location'] = ffmpeg_exe
 
