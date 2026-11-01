@@ -118,12 +118,13 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 
 
 def download_youtube_video(url: str, output_dir: str):
-    """Скачивание YouTube-видео через yt-dlp с cookies."""
+    """Скачивание YouTube-видео через yt-dlp с cookies и решением JS-челленджей (deno)."""
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
-        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/18/best[ext=mp4]/best',
+        'format': 'bestvideo[height<=720][filesize_approx<38M]+bestaudio/bestvideo[height<=480]+bestaudio/18/best',
         'merge_output_format': 'mp4',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
+        'remote_components': ['ejs:github'],
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
@@ -146,12 +147,13 @@ def download_youtube_video(url: str, output_dir: str):
 
 
 def download_youtube_audio(video_id: str, output_dir: str):
-    """Скачивание аудиодорожки с YouTube через cookies."""
+    """Скачивание аудиодорожки с YouTube через cookies и deno."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio/18/best',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
+        'remote_components': ['ejs:github'],
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
