@@ -41,7 +41,7 @@ YOUTUBE_URL_REGEX = re.compile(
     r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)[a-zA-Z0-9_\-]+"
 )
 
-# Максимальный размер файла для отправки через Telegram Bot API (50 МБ)
+# Максимальный размер файла для Telegram (50 МБ)
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
 
 
@@ -77,17 +77,17 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 
 
 def download_youtube_video(url: str, output_dir: str):
-    """Синхронная функция скачивания YouTube-видео через yt-dlp."""
+    """Синхронная функция скачивания YouTube-видео через yt-dlp с контролем размера."""
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     ydl_opts = {
         'ffmpeg_location': ffmpeg_exe,
-        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
+        # Подбираем лучшее качество, которое гарантированно поместится в лимит 50 МБ:
+        'format': 'bestvideo[height<=720][filesize_approx<38M]+bestaudio/bestvideo[height<=480][filesize_approx<42M]+bestaudio/best[height<=480]/best[height<=360]/best',
         'merge_output_format': 'mp4',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'max_filesize': MAX_TELEGRAM_FILE_SIZE,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -106,9 +106,9 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "👋 **Привет!**\n\n"
         "Я умею скачивать видео из **TikTok** и **YouTube** (включая Shorts)!\n\n"
-        "Отправь мне ссылку:\n"
+        "Просто отправь мне ссылку:\n"
         "• **TikTok** (видео без водяного знака и фото-карусели)\n"
-        "• **YouTube / Shorts** (видео до 50 МБ)",
+        "• **YouTube / Shorts** (видео со звуком)",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -121,21 +121,21 @@ async def handle_tiktok_link(message: types.Message):
         return
 
     tiktok_url = match.group(0)
-    status_msg = await message.reply("⏳ Загружаю из TikTok, пожалуйста, подождите...")
+    status_msg = await message.reply("⏳ Загружаю из TikTok...")
 
     try:
         await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
         data = await fetch_tiktok_data(tiktok_url)
 
         if not data:
-            await status_msg.edit_text("❌ Не удалось найти видео TikTok. Возможно, аккаунт приватный или видео удалено.")
+            await status_msg.edit_text("❌ Не удалось найти видео TikTok. Возможно, оно приватное или удалено.")
             return
 
         title = data.get("title") or ""
         clean_title = (title[:180] + "...") if len(title) > 180 else title
         caption = f"🎬 {clean_title}" if clean_title else "🎬 TikTok видео"
 
-        # 1. Фото-слайдшоу
+        # 1. Фото-карусель
         images = data.get("images")
         if images and isinstance(images, list):
             await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_PHOTO)
@@ -171,8 +171,8 @@ async def handle_tiktok_link(message: types.Message):
         await status_msg.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке TikTok ссылки: {e}", exc_info=True)
-        await status_msg.edit_text("⚠️ Произошла ошибка при скачивании из TikTok.")
+        logger.error(f"Ошибка при обработке TikTok: {e}", exc_info=True)
+        await status_msg.edit_text("⚠️ Ошибка при скачивании из TikTok. Попробуйте еще раз.")
 
 
 # --- Обработчик ссылок YouTube / Shorts ---
@@ -183,17 +183,16 @@ async def handle_youtube_link(message: types.Message):
         return
 
     yt_url = match.group(0)
-    status_msg = await message.reply("⏳ Загружаю видео из YouTube, пожалуйста, подождите...")
+    status_msg = await message.reply("⏳ Загружаю видео из YouTube, подождите немного...")
 
     try:
         await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            # Скачиваем видео в отдельном потоке, чтобы не блокировать бота
             info, file_path = await asyncio.to_thread(download_youtube_video, yt_url, tmp_dir)
 
             if not file_path or not os.path.exists(file_path):
-                await status_msg.edit_text("❌ Не удалось скачать видео с YouTube.")
+                await status_msg.edit_text("❌ Не удалось найти или скачать видео.")
                 return
 
             file_size = os.path.getsize(file_path)
@@ -213,16 +212,12 @@ async def handle_youtube_link(message: types.Message):
             await status_msg.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка при обработке YouTube ссылки: {e}", exc_info=True)
-        err_msg = str(e)
-        if "File is larger than max_filesize" in err_msg:
-            await status_msg.edit_text("❌ Размер этого видео превышает лимит Telegram (50 МБ).")
-        else:
-            await status_msg.edit_text("⚠️ Не удалось скачать видео с YouTube. Проверьте ссылку или доступность ролика.")
+        logger.error(f"Ошибка при обработке YouTube: {e}", exc_info=True)
+        await status_msg.edit_text("⚠️ Не удалось скачать видео с YouTube. Проверьте ссылку или доступность ролика.")
 
 
 async def start_health_check_server():
-    """Запускает мини веб-сервер для Render Web Service."""
+    """Запускает веб-сервер для Render Web Service."""
     app = web.Application()
 
     async def handle_ping(request):
@@ -236,7 +231,7 @@ async def start_health_check_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Веб-сервер проверки здоровья запущен на порту {port}")
+    logger.info(f"Веб-сервер запущен на порту {port}")
 
 
 async def main():
