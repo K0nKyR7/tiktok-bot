@@ -117,18 +117,18 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 
 
 def download_youtube_video(url: str, output_dir: str):
-    """Скачивание YouTube-видео через yt-dlp с поддержкой обхода блокировок."""
+    """Скачивание YouTube-видео через yt-dlp с мобильным клиентом Android (без блокировок)."""
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
-        'format': 'bestvideo[height<=720][filesize_approx<38M]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio[ext=m4a]/18/best[ext=mp4]/best',
-        'merge_output_format': 'mp4',
+        'format': '18/best[ext=mp4]/best',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web']
+                'player_client': ['android', 'ios'],
+                'player_skip': ['web', 'web_safari']
             }
         },
     }
@@ -148,18 +148,19 @@ def download_youtube_video(url: str, output_dir: str):
 
 
 def download_youtube_audio(video_id: str, output_dir: str):
-    """Скачивание аудиодорожки с YouTube."""
+    """Скачивание аудиодорожки с YouTube через мобильный клиент Android."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio/best',
+        'format': 'bestaudio[ext=m4a]/bestaudio/18/best',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web']
+                'player_client': ['android', 'ios'],
+                'player_skip': ['web', 'web_safari']
             }
         },
     }
