@@ -138,11 +138,24 @@ def download_youtube_video(url: str, output_dir: str):
     Попытка 3: Fallback Android/mweb
     """
     ffmpeg_exe = get_ffmpeg_path()
+    proxy = os.getenv("YOUTUBE_PROXY")
     cookie_file = os.path.join(os.path.dirname(__file__), "cookies.txt")
+
+    # Поддержка куков из переменной окружения Render (YOUTUBE_COOKIES)
+    env_cookies = os.getenv("YOUTUBE_COOKIES")
+    if env_cookies:
+        tmp_cookie = os.path.join(tempfile.gettempdir(), "yt_cookies_env.txt")
+        try:
+            with open(tmp_cookie, "w", encoding="utf-8") as f:
+                f.write(env_cookies)
+            cookie_file = tmp_cookie
+        except Exception:
+            pass
+
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
     strategies = [
-        # Стратегия 1: Чистый мобильный Android API (без блокировок датацентров и без PO-token)
+        # Стратегия 1: Чистый мобильный Android API
         {
             "name": "android_direct",
             "opts": {
@@ -159,7 +172,18 @@ def download_youtube_video(url: str, output_dir: str):
                 "noplaylist": True,
             }
         },
-        # Стратегия 2: Android + iOS
+        # Стратегия 2: С cookies
+        *(
+            [{
+                "name": "cookies_auth",
+                "opts": {
+                    "cookiefile": cookie_file,
+                    "format": "18/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                    "noplaylist": True,
+                }
+            }] if has_cookies else []
+        ),
+        # Стратегия 3: Android + iOS
         {
             "name": "mobile_innertube",
             "opts": {
@@ -188,6 +212,8 @@ def download_youtube_video(url: str, output_dir: str):
         }
         if ffmpeg_exe:
             ydl_opts["ffmpeg_location"] = ffmpeg_exe
+        if proxy:
+            ydl_opts["proxy"] = proxy
 
         try:
             logger.info(f"Пробуем стратегию скачивания YouTube: {st['name']}")
@@ -771,36 +797,18 @@ async def start_health_check_server():
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
-        results = {}
-        # Test 1: what is my IP
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get("https://api.ipify.org?format=json") as r:
-                    results["ip"] = await r.json()
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                info, path = await asyncio.to_thread(download_youtube_video, url, tmp_dir)
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                return web.json_response({
+                    "status": "success",
+                    "title": info.get("title"),
+                    "size_mb": round(size_mb, 2),
+                    "file": os.path.basename(path)
+                })
         except Exception as e:
-            results["ip"] = str(e)
-
-        # Test 2: android direct
-        ydl_opts = {
-            "format": "18/best[ext=mp4]/best",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android"],
-                    "player_skip": ["webpage", "configs"],
-                }
-            },
-            "skip_download": True,
-            "quiet": True,
-            "no_warnings": True,
-        }
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                results["android_direct"] = {"title": info.get("title"), "formats": len(info.get("formats", []))}
-        except Exception as e:
-            results["android_direct"] = str(e)
-
-        return web.json_response(results)
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
 
     async def handle_test_ig(request):
         url = request.query.get("url", "https://www.instagram.com/reels/DfI91GEqDeK/")
