@@ -128,66 +128,150 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 # ==========================================
 # 2. YOUTUBE (Мобильный Android InnerTube API)
 # ==========================================
+# 2. YOUTUBE (Мульти-стратегия с Android/iOS InnerTube и cookies)
+# ==========================================
 def download_youtube_video(url: str, output_dir: str):
-    """Скачивание YouTube-видео через чистый мобильный Android API (без капчи и блокировок)."""
+    """
+    Скачивание YouTube-видео:
+    Попытка 1: Вариант 2 (Android/iOS API без загрузки webpage/configs - обход датацентрового бана)
+    Попытка 2: Вариант 1 (cookies.txt, если сессия валидна)
+    Попытка 3: Fallback Android/mweb
+    """
     ffmpeg_exe = get_ffmpeg_path()
-    ydl_opts = {
-        'format': '18/best[ext=mp4]/best',
-        'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android'],
-                'player_skip': ['web', 'mweb', 'web_safari']
+    cookie_file = os.path.join(os.path.dirname(__file__), "cookies.txt")
+    has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
+
+    strategies = [
+        # Стратегия 1: Android + iOS InnerTube API с пропуском веб-страницы
+        {
+            "name": "mobile_innertube",
+            "opts": {
+                "format": "18/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android", "ios"],
+                        "player_skip": ["webpage", "configs"],
+                    }
+                },
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                },
+                "noplaylist": True,
             }
         },
-    }
-    if ffmpeg_exe:
-        ydl_opts['ffmpeg_location'] = ffmpeg_exe
+    ]
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        video_id = info.get("id")
-        expected_file = os.path.join(output_dir, f"{video_id}.mp4")
-        if not os.path.exists(expected_file):
-            for f in os.listdir(output_dir):
-                if f.startswith(str(video_id)):
-                    expected_file = os.path.join(output_dir, f)
-                    break
-        return info, expected_file
+    if has_cookies:
+        strategies.append({
+            "name": "cookies_txt",
+            "opts": {
+                "cookiefile": cookie_file,
+                "format": "18/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                },
+                "noplaylist": True,
+            }
+        })
+
+    strategies.append({
+        "name": "android_direct",
+        "opts": {
+            "format": "18/best[ext=mp4]/best",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android"],
+                    "player_skip": ["webpage", "configs"],
+                }
+            },
+            "noplaylist": True,
+        }
+    })
+
+    last_error = None
+    for st in strategies:
+        ydl_opts = {
+            "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            **st["opts"]
+        }
+        if ffmpeg_exe:
+            ydl_opts["ffmpeg_location"] = ffmpeg_exe
+
+        try:
+            logger.info(f"Пробуем стратегию скачивания YouTube: {st['name']}")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                video_id = info.get("id")
+                for f in os.listdir(output_dir):
+                    if str(video_id) in f:
+                        return info, os.path.join(output_dir, f)
+        except Exception as e:
+            logger.warning(f"Стратегия YouTube '{st['name']}' завершилась ошибкой: {e}")
+            last_error = e
+
+    raise last_error or Exception("Не удалось скачать видео с YouTube.")
 
 
 def download_youtube_audio(video_id: str, output_dir: str):
-    """Скачивание аудиодорожки с YouTube."""
+    """Скачивание аудиодорожки с YouTube через мобильный API или cookies."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
-    ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/18/best',
-        'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android'],
-                'player_skip': ['web', 'mweb', 'web_safari']
-            }
-        },
-    }
-    if ffmpeg_exe:
-        ydl_opts['ffmpeg_location'] = ffmpeg_exe
+    cookie_file = os.path.join(os.path.dirname(__file__), "cookies.txt")
+    has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        expected_file = os.path.join(output_dir, f"{video_id}.m4a")
-        if not os.path.exists(expected_file):
-            for f in os.listdir(output_dir):
-                if f.startswith(str(video_id)):
-                    expected_file = os.path.join(output_dir, f)
-                    break
-        return info, expected_file
+    strategies = [
+        {
+            "name": "mobile_audio",
+            "opts": {
+                "format": "bestaudio[ext=m4a]/18/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android", "ios"],
+                        "player_skip": ["webpage", "configs"],
+                    }
+                },
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                },
+                "noplaylist": True,
+            }
+        }
+    ]
+
+    if has_cookies:
+        strategies.append({
+            "name": "cookies_audio",
+            "opts": {
+                "cookiefile": cookie_file,
+                "format": "bestaudio[ext=m4a]/18/best",
+                "noplaylist": True,
+            }
+        })
+
+    last_error = None
+    for st in strategies:
+        ydl_opts = {
+            "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            **st["opts"]
+        }
+        if ffmpeg_exe:
+            ydl_opts["ffmpeg_location"] = ffmpeg_exe
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                for f in os.listdir(output_dir):
+                    if str(video_id) in f:
+                        return info, os.path.join(output_dir, f)
+        except Exception as e:
+            logger.warning(f"Стратегия YouTube аудио '{st['name']}' завершилась ошибкой: {e}")
+            last_error = e
+
+    raise last_error or Exception("Не удалось скачать аудио с YouTube.")
 
 
 # ==========================================
@@ -202,13 +286,12 @@ async def fetch_pinterest_media(url: str) -> Optional[dict]:
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=headers) as session:
-            # 1. Переходим по ссылке и следуем редиректам (для pin.it)
             async with session.get(url, allow_redirects=True) as resp:
                 if resp.status != 200:
                     return None
                 html = await resp.text()
 
-            # 2. Ищем прямое видео Pinterest CDN (720p/1080p)
+            # 1. Прямое видео Pinterest CDN (720p/1080p)
             vids = re.findall(r'https?://v[0-9]?\.pinimg\.com/videos/[^\s"\'\\]+\.mp4', html)
             if vids:
                 best_vid = vids[0]
@@ -218,18 +301,18 @@ async def fetch_pinterest_media(url: str) -> Optional[dict]:
                         break
                 return {"type": "video", "url": best_vid}
 
-            # 3. Ищем оригинальное фото (originals)
+            # 2. Оригинальное фото (originals)
             imgs = re.findall(r'https?://i\.pinimg\.com/originals/[^\s"\'\\]+\.(?:jpg|jpeg|png|webp)', html)
             if imgs:
                 return {"type": "image", "url": imgs[0]}
 
-            # 4. Резервный поиск через yt-dlp
+            # 3. Резервный поиск через yt-dlp
             def extract_pin_ytdlp():
-                opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
+                opts = {"quiet": True, "no_warnings": True, "skip_download": True}
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                    if info.get('url'):
-                        return {"type": "video", "url": info.get('url')}
+                    if info.get("url"):
+                        return {"type": "video", "url": info.get("url")}
                 return None
 
             res = await asyncio.to_thread(extract_pin_ytdlp)
@@ -242,31 +325,79 @@ async def fetch_pinterest_media(url: str) -> Optional[dict]:
 
 
 # ==========================================
-# 4. INSTAGRAM
+# 4. INSTAGRAM (vxinstagram + yt-dlp + vkr)
 # ==========================================
 async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
-    """Скачивание Instagram Reels / публикаций через мульти-провайдер."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    """Скачивание Instagram Reels / публикаций через надежные мульти-провайдеры."""
 
-    # Способ 1: Парсинг OpenGraph через vxinstagram / ddinstagram
-    vx_url = f"https://www.ddinstagram.com/reel/{shortcode}/"
+    # Способ 1: vxinstagram (проверенный генератор OpenGraph прямых ссылок)
+    vx_endpoints = [
+        f"https://www.vxinstagram.com/reel/{shortcode}/",
+        f"https://www.vxinstagram.com/p/{shortcode}/",
+    ]
+    for vx_url in vx_endpoints:
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=12),
+                headers={"User-Agent": "TelegramBot"}
+            ) as session:
+                async with session.get(vx_url) as r:
+                    if r.status == 200:
+                        html = await r.text()
+                        # Ищем прямой URL видео в og:video или og:video:secure_url
+                        vm = re.search(
+                            r'<meta property=[\x22\x27]og:video(?::secure_url)?[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]',
+                            html
+                        )
+                        if vm and vm.group(1).endswith(".mp4"):
+                            logger.info(f"Instagram найден через vxinstagram: {vm.group(1)}")
+                            return {"type": "video", "url": vm.group(1)}
+
+                        # Если это публикация с фото
+                        im = re.search(
+                            r'<meta property=[\x22\x27]og:image[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]',
+                            html
+                        )
+                        if im and not im.group(1).endswith(".mp4"):
+                            logger.info(f"Instagram фото найдено через vxinstagram: {im.group(1)}")
+                            return {"type": "image", "url": im.group(1)}
+        except Exception as e:
+            logger.warning(f"Ошибка vxinstagram ({vx_url}): {e}")
+
+    # Способ 2: yt-dlp Instagram экстрактор
+    def extract_ig_ytdlp():
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info.get("url"):
+                return {"type": "video", "url": info.get("url")}
+            formats = info.get("formats", [])
+            if formats:
+                return {"type": "video", "url": formats[-1].get("url")}
+        return None
+
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), headers={"User-Agent": "TelegramBot"}) as session:
-            async with session.get(vx_url) as r:
-                if r.status == 200:
-                    html = await r.text()
-                    vm = re.search(r'<meta property=[\x22\x27]og:video(?::secure_url)?[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]', html)
-                    if vm:
-                        return {"type": "video", "url": vm.group(1)}
+        res = await asyncio.to_thread(extract_ig_ytdlp)
+        if res and res.get("url"):
+            logger.info("Instagram найден через yt-dlp")
+            return res
     except Exception as e:
-        logger.warning(f"ddinstagram fallback: {e}")
+        logger.warning(f"Ошибка yt-dlp instagram: {e}")
 
-    # Способ 2: Публичный API парсинга
+    # Способ 3: vkrdownloader API
     try:
         api_url = f"https://api.vkrdownloader.com/server?vkr={url}"
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), headers=headers) as session:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10),
+            headers={"User-Agent": "Mozilla/5.0"}
+        ) as session:
             async with session.get(api_url) as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
@@ -275,28 +406,7 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
                         if d.get("url"):
                             return {"type": "video", "url": d.get("url")}
     except Exception as e:
-        logger.warning(f"vkr fallback: {e}")
-
-    # Способ 3: yt-dlp с эмуляцией браузера
-    def extract_ig_ytdlp():
-        opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'extractor_args': {'instagram': {'api': ['ios', 'web']}}
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if info.get('url'):
-                return {"type": "video", "url": info.get('url')}
-        return None
-
-    try:
-        res = await asyncio.to_thread(extract_ig_ytdlp)
-        if res:
-            return res
-    except Exception as e:
-        logger.warning(f"yt-dlp instagram error: {e}")
+        logger.warning(f"Ошибка vkr: {e}")
 
     return None
 
@@ -636,14 +746,41 @@ async def callback_youtube_audio(callback: CallbackQuery):
 # HEALTH CHECK СЕРВЕР (ДЛЯ RENDER)
 # ==========================================
 async def start_health_check_server():
-    """Запускает веб-сервер для Render Web Service."""
+    """Запускает веб-сервер для Render Web Service с диагностикой."""
     app = web.Application()
 
     async def handle_ping(request):
-        return web.Response(text="Bot is running! Version: v7-ultimate (TikTok, YouTube, Instagram, Pinterest)")
+        return web.Response(text="Bot is running! Version: v8-ultimate-multi (TikTok, YouTube, Instagram, Pinterest)")
+
+    async def handle_test_yt(request):
+        url = request.query.get("url", "https://youtu.be/Uj0Qn32tER0")
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                info, path = await asyncio.to_thread(download_youtube_video, url, tmp_dir)
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                return web.json_response({
+                    "status": "success",
+                    "title": info.get("title"),
+                    "size_mb": round(size_mb, 2),
+                    "file": os.path.basename(path)
+                })
+        except Exception as e:
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+    async def handle_test_ig(request):
+        url = request.query.get("url", "https://www.instagram.com/reels/DfI91GEqDeK/")
+        m = INSTAGRAM_URL_REGEX.search(url)
+        shortcode = m.group(1) if m else "DfI91GEqDeK"
+        try:
+            res = await fetch_instagram_media(url, shortcode)
+            return web.json_response({"status": "success" if res else "not_found", "data": res})
+        except Exception as e:
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
 
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
+    app.router.add_get("/test-yt", handle_test_yt)
+    app.router.add_get("/test-ig", handle_test_ig)
 
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
