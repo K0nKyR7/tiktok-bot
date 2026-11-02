@@ -3,4 +3,3 @@ aiohttp
 python-dotenv
 yt-dlp
 imageio-ffmpeg
-deno

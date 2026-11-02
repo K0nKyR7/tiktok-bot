@@ -415,7 +415,7 @@ async def start_health_check_server():
     app = web.Application()
 
     async def handle_ping(request):
-        return web.Response(text="Bot is running! Version: v5-diag")
+        return web.Response(text="Bot is running! Version: v6-android-direct")
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/Uj0Qn32tER0")
