@@ -155,60 +155,55 @@ def download_youtube_video(url: str, output_dir: str):
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
     strategies = []
-    # 1. TV Samsung + Web Embedded с cookies (лучший обход блокировок на VPS/Render)
-    if has_cookies:
-        strategies.append({
-            "name": "tv_embedded_cookies",
-            "opts": {
-                "cookiefile": cookie_file,
-                "format": "18/best[ext=mp4]/best",
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["tv_samsung", "web_embedded", "visionos"],
-                    }
-                },
-                "noplaylist": True,
-            }
-        })
 
-        strategies.append({
-            "name": "android_cookies",
-            "opts": {
-                "cookiefile": cookie_file,
-                "format": "18/best[ext=mp4]/best",
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["android", "ios"],
-                    }
-                },
-                "noplaylist": True,
-            }
-        })
-
-        strategies.append({
-            "name": "cookies_default",
-            "opts": {
-                "cookiefile": cookie_file,
-                "format": "18/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-                "noplaylist": True,
-            }
-        })
-
-    # 2. Без cookies: TV Samsung / VisionOS
+    # 1. TV Samsung без cookies (100% не триггерит капчу/бан датацентровых IP YouTube)
     strategies.append({
-        "name": "tv_samsung_direct",
+        "name": "tv_samsung_pure",
         "opts": {
-            "format": "18/best[ext=mp4]/best",
+            "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/18/best",
+            "merge_output_format": "mp4",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["tv_samsung", "visionos"],
+                    "player_client": ["tv_samsung"],
                 }
             },
             "noplaylist": True,
         }
     })
 
-    # 3. Мобильный Android InnerTube
+    # 2. VisionOS без cookies
+    strategies.append({
+        "name": "visionos_pure",
+        "opts": {
+            "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/18/best",
+            "merge_output_format": "mp4",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["visionos"],
+                }
+            },
+            "noplaylist": True,
+        }
+    })
+
+    # 3. TV Samsung с cookies (резерв)
+    if has_cookies:
+        strategies.append({
+            "name": "tv_samsung_cookies",
+            "opts": {
+                "cookiefile": cookie_file,
+                "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/18/best",
+                "merge_output_format": "mp4",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["tv_samsung"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        })
+
+    # 4. Мобильный Android InnerTube
     strategies.append({
         "name": "android_direct",
         "opts": {
@@ -268,7 +263,33 @@ def download_youtube_audio(video_id: str, output_dir: str):
 
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
-    strategies = []
+    strategies = [
+        {
+            "name": "tv_samsung_audio",
+            "opts": {
+                "format": "bestaudio[ext=m4a]/bestaudio/140/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["tv_samsung"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        {
+            "name": "visionos_audio",
+            "opts": {
+                "format": "bestaudio[ext=m4a]/bestaudio/140/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["visionos"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        }
+    ]
+
     if has_cookies:
         strategies.append({
             "name": "tv_embedded_audio",
@@ -277,7 +298,7 @@ def download_youtube_audio(video_id: str, output_dir: str):
                 "format": "bestaudio[ext=m4a]/18/best",
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["tv_samsung", "web_embedded", "visionos"],
+                        "player_client": ["tv_samsung"],
                     }
                 },
                 "noplaylist": True,
@@ -291,19 +312,6 @@ def download_youtube_audio(video_id: str, output_dir: str):
                 "noplaylist": True,
             }
         })
-
-    strategies.append({
-        "name": "tv_direct_audio",
-        "opts": {
-            "format": "bestaudio[ext=m4a]/18/best",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["tv_samsung", "visionos"],
-                }
-            },
-            "noplaylist": True,
-        }
-    })
 
     strategies.append({
         "name": "android_audio",
@@ -861,7 +869,7 @@ async def start_health_check_server():
         cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
         c_exists = os.path.exists(cookie_path)
         c_size = os.path.getsize(cookie_path) if c_exists else 0
-        return web.Response(text=f"Bot v10-multi-clients | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v11-pure-tv-samsung | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
