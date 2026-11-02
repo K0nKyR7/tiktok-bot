@@ -770,19 +770,37 @@ async def start_health_check_server():
         return web.Response(text="Bot is running! Version: v8-ultimate-multi (TikTok, YouTube, Instagram, Pinterest)")
 
     async def handle_test_yt(request):
-        url = request.query.get("url", "https://youtu.be/Uj0Qn32tER0")
+        url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
+        results = {}
+        # Test 1: what is my IP
         try:
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                info, path = await asyncio.to_thread(download_youtube_video, url, tmp_dir)
-                size_mb = os.path.getsize(path) / (1024 * 1024)
-                return web.json_response({
-                    "status": "success",
-                    "title": info.get("title"),
-                    "size_mb": round(size_mb, 2),
-                    "file": os.path.basename(path)
-                })
+            async with aiohttp.ClientSession() as s:
+                async with s.get("https://api.ipify.org?format=json") as r:
+                    results["ip"] = await r.json()
         except Exception as e:
-            return web.json_response({"status": "error", "message": str(e)}, status=500)
+            results["ip"] = str(e)
+
+        # Test 2: android direct
+        ydl_opts = {
+            "format": "18/best[ext=mp4]/best",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android"],
+                    "player_skip": ["webpage", "configs"],
+                }
+            },
+            "skip_download": True,
+            "quiet": True,
+            "no_warnings": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                results["android_direct"] = {"title": info.get("title"), "formats": len(info.get("formats", []))}
+        except Exception as e:
+            results["android_direct"] = str(e)
+
+        return web.json_response(results)
 
     async def handle_test_ig(request):
         url = request.query.get("url", "https://www.instagram.com/reels/DfI91GEqDeK/")
