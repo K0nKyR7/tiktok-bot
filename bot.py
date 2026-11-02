@@ -5,6 +5,8 @@ import re
 import shutil
 import tempfile
 import time
+import json
+import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -869,7 +871,7 @@ async def start_health_check_server():
         cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
         c_exists = os.path.exists(cookie_path)
         c_size = os.path.getsize(cookie_path) if c_exists else 0
-        return web.Response(text=f"Bot v11-pure-tv-samsung | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v12-diag-probe | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
@@ -932,77 +934,132 @@ async def start_health_check_server():
         video_id = "rDskeI7Q58E"
         results = {}
 
-        # 1. Test Y2Mate from Render
-        try:
-            y2_url = 'https://www.y2mate.com/mates/analyzeV2/ajax'
-            data = urllib.parse.urlencode({
-                'k_query': f'https://www.youtube.com/watch?v={video_id}',
-                'k_page': 'home',
-                'hl': 'en',
-                'q_auto': 0
-            }).encode()
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Origin': 'https://www.y2mate.com',
-                'Referer': 'https://www.y2mate.com/en949'
-            }
-            req = urllib.request.Request(y2_url, data=data, headers=headers)
-            with urllib.request.urlopen(req, timeout=8) as r:
-                res_json = json.loads(r.read().decode())
-                results['y2mate'] = {"status": "ok", "title": res_json.get("title"), "has_links": bool(res_json.get("links"))}
-        except Exception as e:
-            results['y2mate'] = {"status": "error", "error": str(e)}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
 
-        # 2. Test Cobalt mirrors from Render
-        cobalt_mirrors = [
-            'https://cobalt-api.kwiatekm.tokyo',
-            'https://api.cobalt.tools',
-            'https://co.wuk.sh/api/json',
-            'https://cobalt.xy2401.com',
-            'https://api.qwk.app'
-        ]
-        for cm in cobalt_mirrors:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # 1. Test Invidious instances
+            invidious_mirrors = [
+                "https://invidious.nerdvpn.de",
+                "https://inv.nadeko.net",
+                "https://invidious.jing.rocks",
+                "https://vid.priv.au",
+                "https://yt.artemislena.eu",
+                "https://invidious.privacydev.net",
+                "https://iv.melmac.space",
+                "https://invidious.drgns.space",
+                "https://yewtu.be",
+                "https://invidious.flokinet.to",
+                "https://iv.ggtyler.dev",
+            ]
+            for im in invidious_mirrors:
+                try:
+                    i_url = f"{im}/api/v1/videos/{video_id}"
+                    async with session.get(i_url, timeout=aiohttp.ClientTimeout(total=4), ssl=False) as r:
+                        if r.status == 200:
+                            data = await r.json(content_type=None)
+                            fs = data.get("formatStreams", [])
+                            results[f"invidious_{im}"] = {
+                                "status": "ok",
+                                "title": data.get("title"),
+                                "formatStreams": len(fs),
+                                "first_stream": fs[0].get("url")[:80] if fs else None
+                            }
+                        else:
+                            results[f"invidious_{im}"] = {"status": "http_error", "code": r.status}
+                except Exception as e:
+                    results[f"invidious_{im}"] = {"status": "error", "error": str(e)}
+
+            # 2. Test Piped instances
+            piped_mirrors = [
+                "https://pipedapi.kavin.rocks",
+                "https://api.piped.privacydev.net",
+                "https://piped-api.lunar.icu",
+                "https://api-piped.mha.fi",
+                "https://pipedapi.tokhmi.xyz"
+            ]
+            for pm in piped_mirrors:
+                try:
+                    p_url = f"{pm}/streams/{video_id}"
+                    async with session.get(p_url, timeout=aiohttp.ClientTimeout(total=4), ssl=False) as r:
+                        if r.status == 200:
+                            data = await r.json(content_type=None)
+                            vs = data.get("videoStreams", [])
+                            results[f"piped_{pm}"] = {
+                                "status": "ok",
+                                "title": data.get("title"),
+                                "videoStreams": len(vs),
+                                "first_stream": vs[0].get("url")[:80] if vs else None
+                            }
+                        else:
+                            results[f"piped_{pm}"] = {"status": "http_error", "code": r.status}
+                except Exception as e:
+                    results[f"piped_{pm}"] = {"status": "error", "error": str(e)}
+
+            # 3. Test Y2Mate
             try:
-                c_req = urllib.request.Request(
-                    cm,
-                    data=json.dumps({"url": test_url}).encode(),
-                    headers={"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-                )
-                with urllib.request.urlopen(c_req, timeout=6) as r:
-                    c_data = json.loads(r.read().decode())
-                    results[f'cobalt_{cm}'] = {"status": "ok", "data": c_data}
-                    break
+                y2_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
+                data = {
+                    "k_query": f"https://www.youtube.com/watch?v={video_id}",
+                    "k_page": "home",
+                    "hl": "en",
+                    "q_auto": "0"
+                }
+                async with session.post(
+                    y2_url,
+                    data=data,
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Origin": "https://www.y2mate.com",
+                        "Referer": "https://www.y2mate.com/en949"
+                    },
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as r:
+                    if r.status == 200:
+                        res_json = await r.json(content_type=None)
+                        links = res_json.get("links", {})
+                        results["y2mate"] = {
+                            "status": "ok",
+                            "title": res_json.get("title"),
+                            "has_mp4": "mp4" in links
+                        }
+                    else:
+                        results["y2mate"] = {"status": "http_error", "code": r.status}
             except Exception as e:
-                results[f'cobalt_{cm}'] = {"status": "error", "error": str(e)}
+                results["y2mate"] = {"status": "error", "error": str(e)}
 
-        # 3. Test SaveFrom from Render
-        try:
-            sf_url = 'https://worker.sf-converter.com/savefrom.php'
-            sf_data = urllib.parse.urlencode({'sf_url': test_url}).encode()
-            sf_req = urllib.request.Request(sf_url, data=sf_data, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(sf_req, timeout=8) as r:
-                results['savefrom'] = {"status": "ok", "len": len(r.read())}
-        except Exception as e:
-            results['savefrom'] = {"status": "error", "error": str(e)}
-
-        # 4. Test Invidious from Render
-        invidious_mirrors = [
-            'https://invidious.nerdvpn.de',
-            'https://inv.nadeko.net',
-            'https://invidious.jing.rocks',
-            'https://vid.priv.au'
-        ]
-        for im in invidious_mirrors:
+            # 4. Test SaveFrom
             try:
-                i_url = f'{im}/api/v1/videos/{video_id}'
-                i_req = urllib.request.Request(i_url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(i_req, timeout=6) as r:
-                    i_data = json.loads(r.read().decode())
-                    results[f'invidious_{im}'] = {"status": "ok", "title": i_data.get("title"), "streams": len(i_data.get("formatStreams", []))}
-                    break
+                sf_url = "https://worker.sf-converter.com/savefrom.php"
+                async with session.post(
+                    sf_url,
+                    data={"sf_url": test_url},
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as r:
+                    results["savefrom"] = {"status": "ok" if r.status == 200 else "error", "code": r.status}
             except Exception as e:
-                results[f'invidious_{im}'] = {"status": "error", "error": str(e)}
+                results["savefrom"] = {"status": "error", "error": str(e)}
+
+        # 5. Test yt-dlp clients (android_vr, web_embedded)
+        for cl in ["android_vr", "web_embedded"]:
+            try:
+                ydl_opts = {
+                    "format": "bestvideo[height<=720]+bestaudio/18/best",
+                    "extractor_args": {"youtube": {"player_client": [cl]}},
+                    "skip_download": True,
+                    "quiet": True,
+                    "no_warnings": True,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(test_url, download=False)
+                    results[f"ytdlp_{cl}"] = {
+                        "status": "ok",
+                        "title": info.get("title"),
+                        "formats": len(info.get("formats", []))
+                    }
+            except Exception as e:
+                results[f"ytdlp_{cl}"] = {"status": "error", "error": str(e)[:120]}
 
         return web.json_response(results)
 
