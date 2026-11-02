@@ -326,7 +326,55 @@ def download_youtube_video(url: str, output_dir: str):
         "18/best[ext=mp4]/best"
     )
 
-    strategies = [
+    strategies = []
+
+    # Если есть cookies (из файла cookies.txt или ENV YOUTUBE_COOKIES) - ставим их ПЕРВЫМИ!
+    # Web cookies обходят датацентровые проверки Google на Render
+    if has_cookies:
+        strategies.extend([
+            {
+                "name": "default_cookies",
+                "opts": {
+                    "cookiefile": cookie_file,
+                    "format": format_selector,
+                    "merge_output_format": "mp4",
+                    "remote_components": ["ejs:github"],
+                    "noplaylist": True,
+                }
+            },
+            {
+                "name": "mweb_cookies",
+                "opts": {
+                    "cookiefile": cookie_file,
+                    "format": format_selector,
+                    "merge_output_format": "mp4",
+                    "remote_components": ["ejs:github"],
+                    "extractor_args": {
+                        "youtube": {
+                            "player_client": ["mweb"],
+                        }
+                    },
+                    "noplaylist": True,
+                }
+            },
+            {
+                "name": "web_embedded_cookies",
+                "opts": {
+                    "cookiefile": cookie_file,
+                    "format": format_selector,
+                    "merge_output_format": "mp4",
+                    "remote_components": ["ejs:github"],
+                    "extractor_args": {
+                        "youtube": {
+                            "player_client": ["web_embedded"],
+                        }
+                    },
+                    "noplaylist": True,
+                }
+            },
+        ])
+
+    strategies.extend([
         # 1. Web Embedded с удаленными компонентами для решения JS-челленджей (обходит PO Token)
         {
             "name": "web_embedded",
@@ -432,25 +480,7 @@ def download_youtube_video(url: str, output_dir: str):
                 "noplaylist": True,
             }
         }
-    ]
-
-    # Резерв с cookies
-    if has_cookies:
-        strategies.append({
-            "name": "tv_samsung_cookies",
-            "opts": {
-                "cookiefile": cookie_file,
-                "format": format_selector,
-                "merge_output_format": "mp4",
-                "remote_components": ["ejs:github"],
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["tv_samsung"],
-                    }
-                },
-                "noplaylist": True,
-            }
-        })
+    ])
 
     strategy_errors = []
     for st in strategies:
@@ -486,8 +516,40 @@ def download_youtube_video(url: str, output_dir: str):
     raise Exception(" | ".join(strategy_errors) or "Не удалось скачать видео с YouTube.")
 
 
+def ensure_mp3_file(input_path: str, ffmpeg_exe: Optional[str] = None) -> str:
+    """Гарантирует, что аудиофайл сохранен именно как настоящий MP3 (192 kbps)."""
+    if not input_path or not os.path.exists(input_path):
+        return input_path
+    if input_path.lower().endswith(".mp3"):
+        return input_path
+
+    mp3_path = os.path.splitext(input_path)[0] + ".mp3"
+    ff = ffmpeg_exe or get_ffmpeg_path() or "ffmpeg"
+    try:
+        cmd = [
+            ff, "-y",
+            "-i", input_path,
+            "-vn",
+            "-c:a", "libmp3lame",
+            "-b:a", "192k",
+            mp3_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 1000:
+            try:
+                os.remove(input_path)
+            except Exception:
+                pass
+            return mp3_path
+        else:
+            logger.warning(f"ffmpeg conversion failed: {res.stderr.decode('utf-8', errors='ignore')}")
+    except Exception as e:
+        logger.warning(f"Ошибка ручной конвертации в MP3: {e}")
+    return input_path
+
+
 def download_youtube_audio(video_id: str, output_dir: str):
-    """Скачивание аудиодорожки с YouTube через web_embedded, TV API или cookies."""
+    """Скачивание аудиодорожки с YouTube с гарантированной конвертацией в MP3 192kbps."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
     setup_deno_path()
@@ -500,12 +562,63 @@ def download_youtube_audio(video_id: str, output_dir: str):
 
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
-    strategies = [
-        # 1. Web Embedded аудио (чистый m4a поток, без капчи и PO Token)
+    mp3_postprocessor = [{
+        "key": "FFmpegExtractAudio",
+        "preferredcodec": "mp3",
+        "preferredquality": "192",
+    }]
+
+    strategies = []
+    if has_cookies:
+        strategies.extend([
+            {
+                "name": "default_cookies_audio",
+                "opts": {
+                    "cookiefile": cookie_file,
+                    "format": "bestaudio/best",
+                    "remote_components": ["ejs:github"],
+                    "noplaylist": True,
+                    "postprocessors": mp3_postprocessor,
+                }
+            },
+            {
+                "name": "mweb_cookies_audio",
+                "opts": {
+                    "cookiefile": cookie_file,
+                    "format": "bestaudio/best",
+                    "remote_components": ["ejs:github"],
+                    "extractor_args": {
+                        "youtube": {
+                            "player_client": ["mweb"],
+                        }
+                    },
+                    "noplaylist": True,
+                    "postprocessors": mp3_postprocessor,
+                }
+            },
+            {
+                "name": "web_embedded_cookies_audio",
+                "opts": {
+                    "cookiefile": cookie_file,
+                    "format": "bestaudio/best",
+                    "remote_components": ["ejs:github"],
+                    "extractor_args": {
+                        "youtube": {
+                            "player_client": ["web_embedded"],
+                        }
+                    },
+                    "noplaylist": True,
+                    "postprocessors": mp3_postprocessor,
+                }
+            },
+        ])
+
+    strategies.extend([
+        # 1. Web Embedded аудио
         {
             "name": "web_embedded_audio",
             "opts": {
-                "format": "bestaudio[ext=m4a]/bestaudio/140/18/best",
+                "format": "bestaudio/best",
                 "remote_components": ["ejs:github"],
                 "extractor_args": {
                     "youtube": {
@@ -513,39 +626,42 @@ def download_youtube_audio(video_id: str, output_dir: str):
                     }
                 },
                 "noplaylist": True,
+                "postprocessors": mp3_postprocessor,
             }
         },
         # 2. Android VR аудио
         {
             "name": "android_vr_audio",
             "opts": {
-                "format": "bestaudio[ext=m4a]/bestaudio/140/18/best",
+                "format": "bestaudio/best",
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["android_vr"],
                     }
                 },
                 "noplaylist": True,
+                "postprocessors": mp3_postprocessor,
             }
         },
         # 3. MWeb аудио
         {
             "name": "mweb_audio",
             "opts": {
-                "format": "bestaudio[ext=m4a]/bestaudio/140/18/best",
+                "format": "bestaudio/best",
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["mweb"],
                     }
                 },
                 "noplaylist": True,
+                "postprocessors": mp3_postprocessor,
             }
         },
         # 4. TV Samsung аудио
         {
             "name": "tv_samsung_audio",
             "opts": {
-                "format": "bestaudio[ext=m4a]/bestaudio/140/best",
+                "format": "bestaudio/best",
                 "remote_components": ["ejs:github"],
                 "extractor_args": {
                     "youtube": {
@@ -553,13 +669,14 @@ def download_youtube_audio(video_id: str, output_dir: str):
                     }
                 },
                 "noplaylist": True,
+                "postprocessors": mp3_postprocessor,
             }
         },
         # 5. VisionOS аудио
         {
             "name": "visionos_audio",
             "opts": {
-                "format": "bestaudio[ext=m4a]/bestaudio/140/best",
+                "format": "bestaudio/best",
                 "remote_components": ["ejs:github"],
                 "extractor_args": {
                     "youtube": {
@@ -567,13 +684,14 @@ def download_youtube_audio(video_id: str, output_dir: str):
                     }
                 },
                 "noplaylist": True,
+                "postprocessors": mp3_postprocessor,
             }
         },
         # 6. Android InnerTube
         {
             "name": "android_audio",
             "opts": {
-                "format": "18/bestaudio[ext=m4a]/best",
+                "format": "bestaudio/best",
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["android"],
@@ -584,19 +702,10 @@ def download_youtube_audio(video_id: str, output_dir: str):
                     "User-Agent": "com.google.android.youtube/19.10.37 (Linux; U; Android 14; en_US) gzip",
                 },
                 "noplaylist": True,
+                "postprocessors": mp3_postprocessor,
             }
         }
-    ]
-
-    if has_cookies:
-        strategies.append({
-            "name": "cookies_audio",
-            "opts": {
-                "cookiefile": cookie_file,
-                "format": "bestaudio[ext=m4a]/18/best",
-                "noplaylist": True,
-            }
-        })
+    ])
 
     last_error = None
     for st in strategies:
@@ -613,8 +722,12 @@ def download_youtube_audio(video_id: str, output_dir: str):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 for f in os.listdir(output_dir):
-                    if str(video_id) in f:
+                    if str(video_id) in f and f.lower().endswith(".mp3"):
                         return info, os.path.join(output_dir, f)
+                for f in os.listdir(output_dir):
+                    if str(video_id) in f:
+                        final_path = ensure_mp3_file(os.path.join(output_dir, f), ffmpeg_exe)
+                        return info, final_path
         except Exception as e:
             logger.warning(f"Стратегия YouTube аудио '{st['name']}' завершилась ошибкой: {e}")
             last_error = e
@@ -622,7 +735,9 @@ def download_youtube_audio(video_id: str, output_dir: str):
     # Резервный шаг: внешнее API для аудио
     ext_res = download_youtube_via_external(url, output_dir, is_audio=True)
     if ext_res:
-        return ext_res
+        ext_info, ext_path = ext_res
+        final_mp3 = ensure_mp3_file(ext_path, ffmpeg_exe)
+        return ext_info, final_mp3
 
     raise last_error or Exception("Не удалось скачать аудио с YouTube.")
 
@@ -1091,19 +1206,30 @@ async def callback_tiktok_audio(callback: CallbackQuery):
 
         audio_url = to_absolute_url(data.get("music"))
         music_info = data.get("music_info") or {}
-        track_title = music_info.get("title") or "Audio"
-        author = music_info.get("author") or "TikTok"
+        raw_title = music_info.get("title") or "Audio"
+        raw_author = music_info.get("author") or "TikTok"
+        clean_title = re.sub(r'[\\/*?:"<>|\r\n]', "", raw_title).strip() or "Audio"
+        clean_author = re.sub(r'[\\/*?:"<>|\r\n]', "", raw_author).strip() or "TikTok"
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            async with session.get(audio_url) as resp:
-                if resp.status == 200:
-                    audio_bytes = await resp.read()
-                    audio_file = BufferedInputFile(audio_bytes, filename=f"{track_title}.mp3")
-                    await callback.message.reply_audio(
-                        audio=audio_file,
-                        title=track_title,
-                        performer=author
-                    )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            raw_path = os.path.join(tmp_dir, "raw_audio")
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                async with session.get(audio_url) as resp:
+                    if resp.status == 200:
+                        with open(raw_path, "wb") as f:
+                            f.write(await resp.read())
+
+            if os.path.exists(raw_path) and os.path.getsize(raw_path) > 1000:
+                mp3_path = ensure_mp3_file(raw_path)
+                filename = f"{clean_title[:60]}.mp3"
+                audio_file = FSInputFile(mp3_path, filename=filename)
+                await callback.message.reply_audio(
+                    audio=audio_file,
+                    title=clean_title[:60],
+                    performer=clean_author[:60]
+                )
+            else:
+                await callback.message.reply("⚠️ Не удалось загрузить аудио.")
     except Exception as e:
         logger.error(f"Ошибка TikTok аудио: {e}")
         await callback.message.reply("⚠️ Не удалось загрузить аудио.")
@@ -1118,17 +1244,23 @@ async def callback_youtube_audio(callback: CallbackQuery):
         with tempfile.TemporaryDirectory() as tmp_dir:
             info, file_path = await asyncio.to_thread(download_youtube_audio, video_id, tmp_dir)
             if file_path and os.path.exists(file_path):
-                title = info.get("title") or "Audio"
+                raw_title = info.get("title") or "Audio"
                 channel = info.get("uploader") or "YouTube"
-                audio_file = FSInputFile(file_path, filename=f"{title}.m4a")
+                clean_title = re.sub(r'[\\/*?:"<>|\r\n]', "", raw_title).strip() or "Audio"
+                clean_channel = re.sub(r'[\\/*?:"<>|\r\n]', "", channel).strip() or "YouTube"
+                filename = f"{clean_title[:60]}.mp3"
+
+                audio_file = FSInputFile(file_path, filename=filename)
                 await callback.message.reply_audio(
                     audio=audio_file,
-                    title=title[:60],
-                    performer=channel[:60]
+                    title=clean_title[:60],
+                    performer=clean_channel[:60]
                 )
+            else:
+                await callback.message.reply("❌ Не удалось сохранить аудиофайл.")
     except Exception as e:
         logger.error(f"Ошибка YouTube аудио: {e}")
-        await callback.message.reply("⚠️ Не удалось загрузить аудиодорожку.")
+        await callback.message.reply(f"⚠️ Не удалось загрузить аудиодорожку: {e}")
 
 
 # ==========================================
@@ -1144,7 +1276,26 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v14-universal-embedded-yt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v15-mp3-cookies-yt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+
+    async def handle_test_yt_audio(request):
+        url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
+        video_id = url.split("v=")[-1].split("&")[0] if "v=" in url else url.split("/")[-1].split("?")[0]
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                info, path = await asyncio.to_thread(download_youtube_audio, video_id, tmp_dir)
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                return web.json_response({
+                    "status": "success",
+                    "title": info.get("title"),
+                    "size_mb": round(size_mb, 2),
+                    "file": os.path.basename(path)
+                })
+        except Exception as e:
+            return web.json_response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
@@ -1351,6 +1502,7 @@ async def start_health_check_server():
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
     app.router.add_get("/test-yt", handle_test_yt)
+    app.router.add_get("/test-yt-audio", handle_test_yt_audio)
     app.router.add_get("/test-ig", handle_test_ig)
     app.router.add_get("/test-pin", handle_test_pin)
     app.router.add_get("/test-apis", handle_test_apis)
