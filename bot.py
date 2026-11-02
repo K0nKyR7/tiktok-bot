@@ -415,10 +415,25 @@ async def start_health_check_server():
     app = web.Application()
 
     async def handle_ping(request):
-        return web.Response(text="Bot is running! Version: v4-yt-fixed")
+        return web.Response(text="Bot is running! Version: v5-diag")
+
+    async def handle_test_yt(request):
+        url = request.query.get("url", "https://youtu.be/Uj0Qn32tER0")
+        import io, traceback
+        from contextlib import redirect_stdout, redirect_stderr
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf), redirect_stderr(buf):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    info, file_path = download_youtube_video(url, tmp_dir)
+                    file_size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else 0
+                    return web.Response(text=f"SUCCESS: {info.get('title')}, size: {file_size}\n\nLOGS:\n{buf.getvalue()}")
+        except Exception as e:
+            return web.Response(text=f"FAILED: {e}\n\nTRACEBACK:\n{traceback.format_exc()}\n\nLOGS:\n{buf.getvalue()}", status=500)
 
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
+    app.router.add_get("/test-yt", handle_test_yt)
 
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
