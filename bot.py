@@ -44,15 +44,20 @@ logger = logging.getLogger("media_bot")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Регулярные выражения для поиска ссылок
+# Регулярные выражения для поиска ссылок на 4 платформы
 TIKTOK_URL_REGEX = re.compile(
     r"https?://(?:www\.|vm\.|vt\.|m\.)?tiktok\.com/[^\s]+"
 )
 YOUTUBE_URL_REGEX = re.compile(
     r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)[a-zA-Z0-9_\-]+"
 )
+INSTAGRAM_URL_REGEX = re.compile(
+    r"https?://(?:www\.)?instagram\.com/(?:p|reel|reels|tv)/([a-zA-Z0-9_\-]+)"
+)
+PINTEREST_URL_REGEX = re.compile(
+    r"https?://(?:[a-zA-Z0-9_\-]+\.)?pinterest\.[a-z.]+/(?:pin/\d+|idea/\d+)|https?://pin\.it/[a-zA-Z0-9_\-]+"
+)
 
-COOKIES_FILE = Path(__file__).resolve().parent / "cookies.txt"
 MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
 
 
@@ -68,7 +73,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_ffmpeg_path() -> Optional[str]:
-    """Находит ffmpeg и гарантирует права на выполнение (особенно для Linux/Render)."""
+    """Находит ffmpeg и гарантирует права на выполнение на Linux/Render."""
     system_ffmpeg = shutil.which("ffmpeg")
     if system_ffmpeg:
         return system_ffmpeg
@@ -95,6 +100,9 @@ def to_absolute_url(url: Optional[str]) -> Optional[str]:
     return f"https://www.tikwm.com{url}"
 
 
+# ==========================================
+# 1. TIKTOK
+# ==========================================
 async def fetch_tiktok_data(url: str) -> Optional[dict]:
     """Запрашивает данные видео через TikWM API."""
     api_url = "https://www.tikwm.com/api/"
@@ -117,8 +125,11 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
     return None
 
 
+# ==========================================
+# 2. YOUTUBE (Мобильный Android InnerTube API)
+# ==========================================
 def download_youtube_video(url: str, output_dir: str):
-    """Скачивание YouTube-видео через чистый мобильный Android API (формат 18 со звуком, без блокировок)."""
+    """Скачивание YouTube-видео через чистый мобильный Android API (без капчи и блокировок)."""
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
         'format': '18/best[ext=mp4]/best',
@@ -149,7 +160,7 @@ def download_youtube_video(url: str, output_dir: str):
 
 
 def download_youtube_audio(video_id: str, output_dir: str):
-    """Скачивание аудиодорожки с YouTube через Android API."""
+    """Скачивание аудиодорожки с YouTube."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
     ydl_opts = {
@@ -179,32 +190,148 @@ def download_youtube_audio(video_id: str, output_dir: str):
         return info, expected_file
 
 
+# ==========================================
+# 3. PINTEREST
+# ==========================================
+async def fetch_pinterest_media(url: str) -> Optional[dict]:
+    """Парсинг видео или изображения из Pinterest (с разворачиванием pin.it)."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=headers) as session:
+            # 1. Переходим по ссылке и следуем редиректам (для pin.it)
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+
+            # 2. Ищем прямое видео Pinterest CDN (720p/1080p)
+            vids = re.findall(r'https?://v[0-9]?\.pinimg\.com/videos/[^\s"\'\\]+\.mp4', html)
+            if vids:
+                best_vid = vids[0]
+                for v in vids:
+                    if "720p" in v or "1080p" in v:
+                        best_vid = v
+                        break
+                return {"type": "video", "url": best_vid}
+
+            # 3. Ищем оригинальное фото (originals)
+            imgs = re.findall(r'https?://i\.pinimg\.com/originals/[^\s"\'\\]+\.(?:jpg|jpeg|png|webp)', html)
+            if imgs:
+                return {"type": "image", "url": imgs[0]}
+
+            # 4. Резервный поиск через yt-dlp
+            def extract_pin_ytdlp():
+                opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info.get('url'):
+                        return {"type": "video", "url": info.get('url')}
+                return None
+
+            res = await asyncio.to_thread(extract_pin_ytdlp)
+            if res:
+                return res
+
+    except Exception as e:
+        logger.error(f"Ошибка Pinterest: {e}")
+    return None
+
+
+# ==========================================
+# 4. INSTAGRAM
+# ==========================================
+async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
+    """Скачивание Instagram Reels / публикаций через мульти-провайдер."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    # Способ 1: Парсинг OpenGraph через vxinstagram / ddinstagram
+    vx_url = f"https://www.ddinstagram.com/reel/{shortcode}/"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), headers={"User-Agent": "TelegramBot"}) as session:
+            async with session.get(vx_url) as r:
+                if r.status == 200:
+                    html = await r.text()
+                    vm = re.search(r'<meta property=[\x22\x27]og:video(?::secure_url)?[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]', html)
+                    if vm:
+                        return {"type": "video", "url": vm.group(1)}
+    except Exception as e:
+        logger.warning(f"ddinstagram fallback: {e}")
+
+    # Способ 2: Публичный API парсинга
+    try:
+        api_url = f"https://api.vkrdownloader.com/server?vkr={url}"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), headers=headers) as session:
+            async with session.get(api_url) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    downloads = data.get("data", {}).get("downloads", [])
+                    for d in downloads:
+                        if d.get("url"):
+                            return {"type": "video", "url": d.get("url")}
+    except Exception as e:
+        logger.warning(f"vkr fallback: {e}")
+
+    # Способ 3: yt-dlp с эмуляцией браузера
+    def extract_ig_ytdlp():
+        opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'extractor_args': {'instagram': {'api': ['ios', 'web']}}
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info.get('url'):
+                return {"type": "video", "url": info.get('url')}
+        return None
+
+    try:
+        res = await asyncio.to_thread(extract_ig_ytdlp)
+        if res:
+            return res
+    except Exception as e:
+        logger.warning(f"yt-dlp instagram error: {e}")
+
+    return None
+
+
+# ==========================================
+# ОБРАБОТЧИКИ КОМАНД И МЕНЮ
+# ==========================================
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 **Добро пожаловать!**\n\n"
-        "Я бот для скачивания медиа из **TikTok** и **YouTube**!\n\n"
-        "📌 **Что я умею:**\n"
+        "Я универсальный бот для скачивания медиа!\n\n"
+        "📌 **Поддерживаемые платформы:**\n"
         "• 🎬 **TikTok** — видео без водяного знака и фото-карусели\n"
-        "• 🎥 **YouTube & Shorts** — видео высокого качества со звуком\n"
-        "• 🎵 **Аудио** — скачивание треков и музыки в один клик\n\n"
-        "Просто отправь мне ссылку!",
+        "• 🎥 **YouTube & Shorts** — видео со звуком без рекламы\n"
+        "• 📸 **Instagram** — Reels и публикации\n"
+        "• 📌 **Pinterest** — видео и фото в высоком разрешении\n\n"
+        "Просто отправь мне любую ссылку!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_main_keyboard(),
     )
 
 
-# --- Кнопки главного меню ---
 @dp.message(F.text == "📖 Инструкция")
 async def btn_instruction(message: types.Message):
     await message.answer(
         "📖 **Инструкция по использованию:**\n\n"
-        "1. Скопируйте ссылку на видео в приложении или браузере:\n"
-        "   • TikTok (кнопка «Поделиться» ➔ «Ссылка»)\n"
-        "   • YouTube или Shorts (кнопка «Поделиться»)\n"
-        "2. Отправьте ссылку боту в этот чат.\n"
-        "3. Бот сразу обработает её и пришлет чистое видео!\n\n"
-        "💡 Под каждым видео будет кнопка **«🎵 Скачать аудио»** для сохранения трека.",
+        "1. Скопируйте ссылку на видео в любом приложении:\n"
+        "   • **TikTok** (кнопка «Поделиться» ➔ «Ссылка»)\n"
+        "   • **YouTube / Shorts** (кнопка «Поделиться»)\n"
+        "   • **Instagram Reels** (кнопка «Поделиться» ➔ «Копировать ссылку»)\n"
+        "   • **Pinterest** (кнопка «Поделиться» или `pin.it`)\n"
+        "2. Отправьте ссылку боту.\n"
+        "3. Бот сразу обработает её и пришлет медиафайл!\n\n"
+        "💡 Для TikTok и YouTube под видео доступна кнопка **«🎵 Скачать аудио»**.",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -218,7 +345,7 @@ async def btn_status(message: types.Message):
         "🟢 **Бот работает стабильно 24/7!**\n\n"
         f"⚡️ Отклик сервера: **{ping} мс**\n"
         "☁️ Хостинг: **Render Cloud**\n"
-        "🛡 Загрузка: **TikTok + YouTube**\n"
+        "🛡 Сервисы: **TikTok • YouTube • Instagram • Pinterest**\n"
         "📦 Макс. размер: **50 МБ**",
         parse_mode=ParseMode.MARKDOWN
     )
@@ -228,16 +355,20 @@ async def btn_status(message: types.Message):
 async def btn_about(message: types.Message):
     await message.answer(
         "ℹ️ **О боте:**\n\n"
-        "🤖 Бот скачивает ролики без водяных знаков и рекламы.\n"
-        "🚀 Быстрая загрузка благодаря облачному серверу.\n"
-        "✨ Поддерживает фото-карусели, обычные видео, Shorts и музыку.",
+        "🤖 Бот скачивает медиа без водяных знаков, рекламы и ограничений.\n"
+        "🚀 Работает на автономном облачном сервере 24/7.\n"
+        "✨ Поддерживает 4 популярные платформы, музыку и фото-карусели.",
         parse_mode=ParseMode.MARKDOWN
     )
 
 
-# --- Обработчик ссылок TikTok ---
+# ==========================================
+# ОБРАБОТЧИКИ ССЫЛОК
+# ==========================================
+
+# --- 1. TikTok ---
 @dp.message(F.text.regexp(TIKTOK_URL_REGEX))
-async def handle_tiktok_link(message: types.Message):
+async def handle_tiktok(message: types.Message):
     match = TIKTOK_URL_REGEX.search(message.text)
     if not match:
         return
@@ -258,14 +389,13 @@ async def handle_tiktok_link(message: types.Message):
         caption = f"🎬 {clean_title}" if clean_title else "🎬 TikTok видео"
         video_id = data.get("id", "")
 
-        # Инлайн-кнопки под видео
         buttons = []
         if data.get("music"):
             buttons.append([InlineKeyboardButton(text="🎵 Скачать аудио", callback_data=f"tta:{video_id}")])
-        buttons.append([InlineKeyboardButton(text="🔗 Открыть оригинал", url=tiktok_url)])
+        buttons.append([InlineKeyboardButton(text="🔗 Открыть в TikTok", url=tiktok_url)])
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-        # 1. Фото-карусель
+        # Фото-карусель
         images = data.get("images")
         if images and isinstance(images, list):
             await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_PHOTO)
@@ -277,7 +407,7 @@ async def handle_tiktok_link(message: types.Message):
             await status_msg.delete()
             return
 
-        # 2. Видео без водяного знака
+        # Видео без водяного знака
         raw_video_url = data.get("play") or data.get("hdplay")
         video_url = to_absolute_url(raw_video_url)
 
@@ -305,15 +435,15 @@ async def handle_tiktok_link(message: types.Message):
         await status_msg.edit_text("⚠️ Ошибка при скачивании из TikTok. Попробуйте еще раз.")
 
 
-# --- Обработчик ссылок YouTube / Shorts ---
+# --- 2. YouTube / Shorts ---
 @dp.message(F.text.regexp(YOUTUBE_URL_REGEX))
-async def handle_youtube_link(message: types.Message):
+async def handle_youtube(message: types.Message):
     match = YOUTUBE_URL_REGEX.search(message.text)
     if not match:
         return
 
     yt_url = match.group(0)
-    status_msg = await message.reply("⏳ Загружаю видео из YouTube, подождите...")
+    status_msg = await message.reply("⏳ Загружаю из YouTube...")
 
     try:
         await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
@@ -322,7 +452,7 @@ async def handle_youtube_link(message: types.Message):
             info, file_path = await asyncio.to_thread(download_youtube_video, yt_url, tmp_dir)
 
             if not file_path or not os.path.exists(file_path):
-                await status_msg.edit_text("❌ Не удалось найти или скачать видео.")
+                await status_msg.edit_text("❌ Не удалось скачать видео.")
                 return
 
             file_size = os.path.getsize(file_path)
@@ -338,7 +468,6 @@ async def handle_youtube_link(message: types.Message):
             caption = f"🎬 {clean_title}"
             vid_id = info.get("id", "")
 
-            # Инлайн-кнопки под видео
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="🎵 Скачать только аудио", callback_data=f"yta:{vid_id}")],
@@ -355,7 +484,101 @@ async def handle_youtube_link(message: types.Message):
         await status_msg.edit_text(f"⚠️ Ошибка: {str(e)[:160]}")
 
 
-# --- Callback: Скачивание аудио TikTok ---
+# --- 3. Instagram Reels / Posts ---
+@dp.message(F.text.regexp(INSTAGRAM_URL_REGEX))
+async def handle_instagram(message: types.Message):
+    match = INSTAGRAM_URL_REGEX.search(message.text)
+    if not match:
+        return
+
+    ig_url = match.group(0)
+    shortcode = match.group(1)
+    status_msg = await message.reply("⏳ Загружаю из Instagram...")
+
+    try:
+        await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
+        media = await fetch_instagram_media(ig_url, shortcode)
+
+        if not media or not media.get("url"):
+            await status_msg.edit_text("❌ Не удалось найти видео. Возможно, профиль приватный или публикация удалена.")
+            return
+
+        media_url = media["url"]
+        caption = "🎬 Instagram Reel"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть в Instagram", url=ig_url)]])
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), headers=headers) as session:
+            async with session.get(media_url) as resp:
+                if resp.status == 200:
+                    media_bytes = await resp.read()
+                    if media.get("type") == "image":
+                        photo_file = BufferedInputFile(media_bytes, filename="instagram.jpg")
+                        await message.reply_photo(photo=photo_file, caption=caption, reply_markup=keyboard)
+                    else:
+                        video_file = BufferedInputFile(media_bytes, filename="instagram.mp4")
+                        await message.reply_video(video=video_file, caption=caption, reply_markup=keyboard)
+                else:
+                    await message.reply_video(video=media_url, caption=caption, reply_markup=keyboard)
+
+        await status_msg.delete()
+
+    except Exception as e:
+        logger.error(f"Ошибка Instagram: {e}", exc_info=True)
+        await status_msg.edit_text("⚠️ Ошибка при скачивании из Instagram. Попробуйте еще раз.")
+
+
+# --- 4. Pinterest Pins / Videos ---
+@dp.message(F.text.regexp(PINTEREST_URL_REGEX))
+async def handle_pinterest(message: types.Message):
+    match = PINTEREST_URL_REGEX.search(message.text)
+    if not match:
+        return
+
+    pin_url = match.group(0)
+    status_msg = await message.reply("⏳ Загружаю из Pinterest...")
+
+    try:
+        media = await fetch_pinterest_media(pin_url)
+
+        if not media or not media.get("url"):
+            await status_msg.edit_text("❌ Не удалось извлечь медиа из Pinterest. Проверьте ссылку.")
+            return
+
+        media_url = media["url"]
+        caption = "📌 Pinterest"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть в Pinterest", url=pin_url)]])
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), headers=headers) as session:
+            async with session.get(media_url) as resp:
+                if resp.status == 200:
+                    media_bytes = await resp.read()
+                    if media.get("type") == "image":
+                        photo_file = BufferedInputFile(media_bytes, filename="pinterest.jpg")
+                        await message.reply_photo(photo=photo_file, caption=caption, reply_markup=keyboard)
+                    else:
+                        video_file = BufferedInputFile(media_bytes, filename="pinterest.mp4")
+                        await message.reply_video(video=video_file, caption=caption, reply_markup=keyboard)
+                else:
+                    await message.reply_video(video=media_url, caption=caption, reply_markup=keyboard)
+
+        await status_msg.delete()
+
+    except Exception as e:
+        logger.error(f"Ошибка Pinterest: {e}", exc_info=True)
+        await status_msg.edit_text("⚠️ Ошибка при скачивании из Pinterest.")
+
+
+# ==========================================
+# CALLBACK-ОБРАБОТЧИКИ АУДИО
+# ==========================================
 @dp.callback_query(F.data.startswith("tta:"))
 async def callback_tiktok_audio(callback: CallbackQuery):
     video_id = callback.data.split(":", 1)[1]
@@ -383,11 +606,10 @@ async def callback_tiktok_audio(callback: CallbackQuery):
                         performer=author
                     )
     except Exception as e:
-        logger.error(f"Ошибка скачивания TikTok аудио: {e}")
+        logger.error(f"Ошибка TikTok аудио: {e}")
         await callback.message.reply("⚠️ Не удалось загрузить аудио.")
 
 
-# --- Callback: Скачивание аудио YouTube ---
 @dp.callback_query(F.data.startswith("yta:"))
 async def callback_youtube_audio(callback: CallbackQuery):
     video_id = callback.data.split(":", 1)[1]
@@ -406,34 +628,22 @@ async def callback_youtube_audio(callback: CallbackQuery):
                     performer=channel[:60]
                 )
     except Exception as e:
-        logger.error(f"Ошибка скачивания YouTube аудио: {e}")
+        logger.error(f"Ошибка YouTube аудио: {e}")
         await callback.message.reply("⚠️ Не удалось загрузить аудиодорожку.")
 
 
+# ==========================================
+# HEALTH CHECK СЕРВЕР (ДЛЯ RENDER)
+# ==========================================
 async def start_health_check_server():
     """Запускает веб-сервер для Render Web Service."""
     app = web.Application()
 
     async def handle_ping(request):
-        return web.Response(text="Bot is running! Version: v6-android-direct")
-
-    async def handle_test_yt(request):
-        url = request.query.get("url", "https://youtu.be/Uj0Qn32tER0")
-        import io, traceback
-        from contextlib import redirect_stdout, redirect_stderr
-        buf = io.StringIO()
-        try:
-            with redirect_stdout(buf), redirect_stderr(buf):
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    info, file_path = download_youtube_video(url, tmp_dir)
-                    file_size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else 0
-                    return web.Response(text=f"SUCCESS: {info.get('title')}, size: {file_size}\n\nLOGS:\n{buf.getvalue()}")
-        except Exception as e:
-            return web.Response(text=f"FAILED: {e}\n\nTRACEBACK:\n{traceback.format_exc()}\n\nLOGS:\n{buf.getvalue()}", status=500)
+        return web.Response(text="Bot is running! Version: v7-ultimate (TikTok, YouTube, Instagram, Pinterest)")
 
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
-    app.router.add_get("/test-yt", handle_test_yt)
 
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
