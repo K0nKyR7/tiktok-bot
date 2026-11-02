@@ -154,6 +154,7 @@ def download_youtube_video(url: str, output_dir: str):
 
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
+    strategies = []
     # 1. TV Samsung + Web Embedded с cookies (лучший обход блокировок на VPS/Render)
     if has_cookies:
         strategies.append({
@@ -270,6 +271,19 @@ def download_youtube_audio(video_id: str, output_dir: str):
     strategies = []
     if has_cookies:
         strategies.append({
+            "name": "tv_embedded_audio",
+            "opts": {
+                "cookiefile": cookie_file,
+                "format": "bestaudio[ext=m4a]/18/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["tv_samsung", "web_embedded", "visionos"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        })
+        strategies.append({
             "name": "cookies_audio",
             "opts": {
                 "cookiefile": cookie_file,
@@ -277,6 +291,19 @@ def download_youtube_audio(video_id: str, output_dir: str):
                 "noplaylist": True,
             }
         })
+
+    strategies.append({
+        "name": "tv_direct_audio",
+        "opts": {
+            "format": "bestaudio[ext=m4a]/18/best",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["tv_samsung", "visionos"],
+                }
+            },
+            "noplaylist": True,
+        }
+    })
 
     strategies.append({
         "name": "android_audio",
