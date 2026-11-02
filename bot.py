@@ -154,22 +154,60 @@ def download_youtube_video(url: str, output_dir: str):
 
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
-    # Если есть cookies (из файла или переменной окружения YOUTUBE_COOKIES), ставим их первым приоритетом
-    strategies = []
+    # 1. TV Samsung + Web Embedded с cookies (лучший обход блокировок на VPS/Render)
     if has_cookies:
         strategies.append({
-            "name": "cookies_auth",
+            "name": "tv_embedded_cookies",
             "opts": {
                 "cookiefile": cookie_file,
-                "format": "18/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "format": "18/best[ext=mp4]/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["tv_samsung", "web_embedded", "visionos"],
+                    }
                 },
                 "noplaylist": True,
             }
         })
 
-    # Мобильный Android InnerTube как резерв
+        strategies.append({
+            "name": "android_cookies",
+            "opts": {
+                "cookiefile": cookie_file,
+                "format": "18/best[ext=mp4]/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android", "ios"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        })
+
+        strategies.append({
+            "name": "cookies_default",
+            "opts": {
+                "cookiefile": cookie_file,
+                "format": "18/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                "noplaylist": True,
+            }
+        })
+
+    # 2. Без cookies: TV Samsung / VisionOS
+    strategies.append({
+        "name": "tv_samsung_direct",
+        "opts": {
+            "format": "18/best[ext=mp4]/best",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["tv_samsung", "visionos"],
+                }
+            },
+            "noplaylist": True,
+        }
+    })
+
+    # 3. Мобильный Android InnerTube
     strategies.append({
         "name": "android_direct",
         "opts": {
@@ -187,7 +225,7 @@ def download_youtube_video(url: str, output_dir: str):
         }
     })
 
-    last_error = None
+    strategy_errors = []
     for st in strategies:
         ydl_opts = {
             "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
@@ -209,10 +247,11 @@ def download_youtube_video(url: str, output_dir: str):
                     if str(video_id) in f:
                         return info, os.path.join(output_dir, f)
         except Exception as e:
-            logger.warning(f"Стратегия YouTube '{st['name']}' завершилась ошибкой: {e}")
-            last_error = e
+            msg = f"[{st['name']}]: {e}"
+            logger.warning(f"Стратегия YouTube {msg}")
+            strategy_errors.append(msg)
 
-    raise last_error or Exception("Не удалось скачать видео с YouTube.")
+    raise Exception(" | ".join(strategy_errors) or "Не удалось скачать видео с YouTube.")
 
 
 def download_youtube_audio(video_id: str, output_dir: str):
@@ -786,7 +825,7 @@ async def start_health_check_server():
         cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
         c_exists = os.path.exists(cookie_path)
         c_size = os.path.getsize(cookie_path) if c_exists else 0
-        return web.Response(text=f"Bot v9-cookies-live | cookies.txt exists: {c_exists}, size: {c_size} bytes | time: 11:05")
+        return web.Response(text=f"Bot v10-multi-clients | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
