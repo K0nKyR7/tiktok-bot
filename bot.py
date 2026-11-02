@@ -783,7 +783,10 @@ async def start_health_check_server():
     app = web.Application()
 
     async def handle_ping(request):
-        return web.Response(text="Bot is running! Version: v8-ultimate-multi (TikTok, YouTube, Instagram, Pinterest)")
+        cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+        c_exists = os.path.exists(cookie_path)
+        c_size = os.path.getsize(cookie_path) if c_exists else 0
+        return web.Response(text=f"Bot v9-cookies-live | cookies.txt exists: {c_exists}, size: {c_size} bytes | time: 11:05")
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
@@ -798,7 +801,16 @@ async def start_health_check_server():
                     "file": os.path.basename(path)
                 })
         except Exception as e:
-            return web.json_response({"status": "error", "message": str(e)}, status=500)
+            cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
+            c_exists = os.path.exists(cookie_path)
+            c_size = os.path.getsize(cookie_path) if c_exists else 0
+            return web.json_response({
+                "status": "error",
+                "message": str(e),
+                "cookie_file_exists": c_exists,
+                "cookie_file_size": c_size,
+                "cookie_file_path": cookie_path
+            }, status=500)
 
     async def handle_test_ig(request):
         url = request.query.get("url", "https://www.instagram.com/reels/DfI91GEqDeK/")
