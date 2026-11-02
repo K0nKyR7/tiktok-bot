@@ -498,6 +498,15 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
 # ==========================================
 # ОБРАБОТЧИКИ КОМАНД И МЕНЮ
 # ==========================================
+@dp.message(F.text == "/id")
+async def cmd_id(message: types.Message):
+    await message.answer(
+        f"🆔 **Ваш Telegram Chat ID:** `{message.chat.id}`\n"
+        f"👤 **Пользователь:** {message.from_user.full_name} (@{message.from_user.username})",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
@@ -910,11 +919,103 @@ async def start_health_check_server():
         except Exception as e:
             return web.json_response({"status": "error", "message": str(e)}, status=500)
 
+    async def handle_test_apis(request):
+        test_url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
+        video_id = "rDskeI7Q58E"
+        results = {}
+
+        # 1. Test Y2Mate from Render
+        try:
+            y2_url = 'https://www.y2mate.com/mates/analyzeV2/ajax'
+            data = urllib.parse.urlencode({
+                'k_query': f'https://www.youtube.com/watch?v={video_id}',
+                'k_page': 'home',
+                'hl': 'en',
+                'q_auto': 0
+            }).encode()
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Origin': 'https://www.y2mate.com',
+                'Referer': 'https://www.y2mate.com/en949'
+            }
+            req = urllib.request.Request(y2_url, data=data, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                res_json = json.loads(r.read().decode())
+                results['y2mate'] = {"status": "ok", "title": res_json.get("title"), "has_links": bool(res_json.get("links"))}
+        except Exception as e:
+            results['y2mate'] = {"status": "error", "error": str(e)}
+
+        # 2. Test Cobalt mirrors from Render
+        cobalt_mirrors = [
+            'https://cobalt-api.kwiatekm.tokyo',
+            'https://api.cobalt.tools',
+            'https://co.wuk.sh/api/json',
+            'https://cobalt.xy2401.com',
+            'https://api.qwk.app'
+        ]
+        for cm in cobalt_mirrors:
+            try:
+                c_req = urllib.request.Request(
+                    cm,
+                    data=json.dumps({"url": test_url}).encode(),
+                    headers={"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(c_req, timeout=6) as r:
+                    c_data = json.loads(r.read().decode())
+                    results[f'cobalt_{cm}'] = {"status": "ok", "data": c_data}
+                    break
+            except Exception as e:
+                results[f'cobalt_{cm}'] = {"status": "error", "error": str(e)}
+
+        # 3. Test SaveFrom from Render
+        try:
+            sf_url = 'https://worker.sf-converter.com/savefrom.php'
+            sf_data = urllib.parse.urlencode({'sf_url': test_url}).encode()
+            sf_req = urllib.request.Request(sf_url, data=sf_data, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(sf_req, timeout=8) as r:
+                results['savefrom'] = {"status": "ok", "len": len(r.read())}
+        except Exception as e:
+            results['savefrom'] = {"status": "error", "error": str(e)}
+
+        # 4. Test Invidious from Render
+        invidious_mirrors = [
+            'https://invidious.nerdvpn.de',
+            'https://inv.nadeko.net',
+            'https://invidious.jing.rocks',
+            'https://vid.priv.au'
+        ]
+        for im in invidious_mirrors:
+            try:
+                i_url = f'{im}/api/v1/videos/{video_id}'
+                i_req = urllib.request.Request(i_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(i_req, timeout=6) as r:
+                    i_data = json.loads(r.read().decode())
+                    results[f'invidious_{im}'] = {"status": "ok", "title": i_data.get("title"), "streams": len(i_data.get("formatStreams", []))}
+                    break
+            except Exception as e:
+                results[f'invidious_{im}'] = {"status": "error", "error": str(e)}
+
+        return web.json_response(results)
+
+    async def handle_send_test(request):
+        target_chat = request.query.get("chat_id")
+        text = request.query.get("text", "✅ Тестовое сообщение от бота: связь установлена!")
+        if not target_chat:
+            return web.json_response({"error": "missing chat_id"}, status=400)
+        try:
+            await bot.send_message(chat_id=int(target_chat), text=text)
+            return web.json_response({"status": "sent", "chat_id": target_chat})
+        except Exception as e:
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
     app.router.add_get("/test-yt", handle_test_yt)
     app.router.add_get("/test-ig", handle_test_ig)
     app.router.add_get("/test-pin", handle_test_pin)
+    app.router.add_get("/test-apis", handle_test_apis)
+    app.router.add_get("/send-test", handle_send_test)
 
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
