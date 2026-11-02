@@ -909,10 +909,9 @@ async def cmd_start(message: types.Message):
         "👋 **Добро пожаловать!**\n\n"
         "Я универсальный бот для скачивания медиа!\n\n"
         "📌 **Поддерживаемые платформы:**\n"
-        "• 🎬 **TikTok** — видео без водяного знака и фото-карусели\n"
-        "• 🎥 **YouTube & Shorts** — видео со звуком без рекламы\n"
+        "• 🎬 **TikTok** — видео без водяного знака, аудио (MP3) и фото-карусели\n"
         "• 📸 **Instagram** — Reels и публикации\n"
-        "• 📌 **Pinterest** — видео и фото в высоком разрешении\n\n"
+        "• 📌 **Pinterest** — видео со звуком и фото в высоком разрешении\n\n"
         "Просто отправь мне любую ссылку!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_main_keyboard(),
@@ -923,14 +922,13 @@ async def cmd_start(message: types.Message):
 async def btn_instruction(message: types.Message):
     await message.answer(
         "📖 **Инструкция по использованию:**\n\n"
-        "1. Скопируйте ссылку на видео в любом приложении:\n"
+        "1. Скопируйте ссылку в приложении:\n"
         "   • **TikTok** (кнопка «Поделиться» ➔ «Ссылка»)\n"
-        "   • **YouTube / Shorts** (кнопка «Поделиться»)\n"
         "   • **Instagram Reels** (кнопка «Поделиться» ➔ «Копировать ссылку»)\n"
         "   • **Pinterest** (кнопка «Поделиться» или `pin.it`)\n"
         "2. Отправьте ссылку боту.\n"
         "3. Бот сразу обработает её и пришлет медиафайл!\n\n"
-        "💡 Для TikTok и YouTube под видео доступна кнопка **«🎵 Скачать аудио»**.",
+        "💡 Для TikTok под видео доступна кнопка **«🎵 Скачать аудио»** (чистый MP3).",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -944,7 +942,7 @@ async def btn_status(message: types.Message):
         "🟢 **Бот работает стабильно 24/7!**\n\n"
         f"⚡️ Отклик сервера: **{ping} мс**\n"
         "☁️ Хостинг: **Render Cloud**\n"
-        "🛡 Сервисы: **TikTok • YouTube • Instagram • Pinterest**\n"
+        "🛡 Сервисы: **TikTok • Instagram • Pinterest**\n"
         "📦 Макс. размер: **50 МБ**",
         parse_mode=ParseMode.MARKDOWN
     )
@@ -956,7 +954,7 @@ async def btn_about(message: types.Message):
         "ℹ️ **О боте:**\n\n"
         "🤖 Бот скачивает медиа без водяных знаков, рекламы и ограничений.\n"
         "🚀 Работает на автономном облачном сервере 24/7.\n"
-        "✨ Поддерживает 4 популярные платформы, музыку и фото-карусели.",
+        "✨ Поддерживает TikTok, Instagram, Pinterest, аудиодорожки в MP3 и фото-карусели.",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -1037,50 +1035,11 @@ async def handle_tiktok(message: types.Message):
 # --- 2. YouTube / Shorts ---
 @dp.message(F.text.regexp(YOUTUBE_URL_REGEX))
 async def handle_youtube(message: types.Message):
-    match = YOUTUBE_URL_REGEX.search(message.text)
-    if not match:
-        return
-
-    yt_url = match.group(0)
-    status_msg = await message.reply("⏳ Загружаю из YouTube...")
-
-    try:
-        await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            info, file_path = await asyncio.to_thread(download_youtube_video, yt_url, tmp_dir)
-
-            if not file_path or not os.path.exists(file_path):
-                await status_msg.edit_text("❌ Не удалось скачать видео.")
-                return
-
-            file_size = os.path.getsize(file_path)
-            if file_size > MAX_TELEGRAM_FILE_SIZE:
-                await status_msg.edit_text(
-                    f"❌ Видео слишком большое ({file_size // (1024 * 1024)} МБ).\n"
-                    "Telegram разрешает ботам отправлять файлы размером не более 50 МБ."
-                )
-                return
-
-            title = info.get("title") or "YouTube video"
-            clean_title = (title[:180] + "...") if len(title) > 180 else title
-            caption = f"🎬 {clean_title}"
-            vid_id = info.get("id", "")
-
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🎵 Скачать только аудио", callback_data=f"yta:{vid_id}")],
-                    [InlineKeyboardButton(text="🔗 Открыть на YouTube", url=yt_url)]
-                ]
-            )
-
-            video_file = FSInputFile(file_path, filename=f"youtube_{vid_id}.mp4")
-            await message.reply_video(video=video_file, caption=caption, reply_markup=keyboard)
-            await status_msg.delete()
-
-    except Exception as e:
-        logger.error(f"Ошибка при обработке YouTube: {e}", exc_info=True)
-        await status_msg.edit_text(f"⚠️ Ошибка: {str(e)[:160]}")
+    await message.reply(
+        "⚠️ **Скачивание с YouTube сейчас недоступно** из-за ограничений и блокировок платформы.\n\n"
+        "✨ Пожалуйста, отправьте ссылку на **TikTok**, **Instagram** или **Pinterest** — они работают быстро и стабильно!",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 
 # --- 3. Instagram Reels / Posts ---
@@ -1276,7 +1235,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v15-mp3-cookies-yt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v16-clean-no-yt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_yt_audio(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
