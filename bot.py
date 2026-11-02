@@ -142,7 +142,24 @@ def download_youtube_video(url: str, output_dir: str):
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
     strategies = [
-        # Стратегия 1: Android + iOS InnerTube API с пропуском веб-страницы
+        # Стратегия 1: Чистый мобильный Android API (без блокировок датацентров и без PO-token)
+        {
+            "name": "android_direct",
+            "opts": {
+                "format": "18/best[ext=mp4]/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android"],
+                        "player_skip": ["webpage", "configs"],
+                    }
+                },
+                "http_headers": {
+                    "User-Agent": "com.google.android.youtube/19.10.37 (Linux; U; Android 14; en_US) gzip",
+                },
+                "noplaylist": True,
+            }
+        },
+        # Стратегия 2: Android + iOS
         {
             "name": "mobile_innertube",
             "opts": {
@@ -160,33 +177,6 @@ def download_youtube_video(url: str, output_dir: str):
             }
         },
     ]
-
-    if has_cookies:
-        strategies.append({
-            "name": "cookies_txt",
-            "opts": {
-                "cookiefile": cookie_file,
-                "format": "18/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                },
-                "noplaylist": True,
-            }
-        })
-
-    strategies.append({
-        "name": "android_direct",
-        "opts": {
-            "format": "18/best[ext=mp4]/best",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android"],
-                    "player_skip": ["webpage", "configs"],
-                }
-            },
-            "noplaylist": True,
-        }
-    })
 
     last_error = None
     for st in strategies:
@@ -223,17 +213,17 @@ def download_youtube_audio(video_id: str, output_dir: str):
 
     strategies = [
         {
-            "name": "mobile_audio",
+            "name": "android_audio",
             "opts": {
-                "format": "bestaudio[ext=m4a]/18/best",
+                "format": "18/bestaudio[ext=m4a]/best",
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["android", "ios"],
+                        "player_client": ["android"],
                         "player_skip": ["webpage", "configs"],
                     }
                 },
                 "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "User-Agent": "com.google.android.youtube/19.10.37 (Linux; U; Android 14; en_US) gzip",
                 },
                 "noplaylist": True,
             }
