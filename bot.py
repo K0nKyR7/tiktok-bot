@@ -7,6 +7,7 @@ import tempfile
 import time
 import json
 import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -103,6 +104,42 @@ def get_ffmpeg_path() -> Optional[str]:
     return None
 
 
+def setup_deno_path() -> Optional[str]:
+    """Находит бинарник deno из pip-пакета deno или системы, делает исполняемым и добавляет в PATH."""
+    system_deno = shutil.which("deno")
+    if system_deno:
+        return system_deno
+    try:
+        import deno
+        deno_bin = deno.find_deno_bin()
+        if deno_bin and os.path.exists(deno_bin):
+            try:
+                st = os.stat(deno_bin)
+                os.chmod(deno_bin, st.st_mode | 0o755)
+            except Exception:
+                pass
+            d = os.path.dirname(deno_bin)
+            std_name = "deno.exe" if os.name == "nt" else "deno"
+            target = os.path.join(d, std_name)
+            if not os.path.exists(target):
+                try:
+                    shutil.copyfile(deno_bin, target)
+                    os.chmod(target, 0o755)
+                except Exception:
+                    pass
+            if d not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            return target if os.path.exists(target) else deno_bin
+    except Exception as e:
+        logger.warning(f"Не удалось получить deno: {e}")
+    return None
+
+
+# Инициализируем PATH для ffmpeg и deno при старте
+get_ffmpeg_path()
+setup_deno_path()
+
+
 def to_absolute_url(url: Optional[str]) -> Optional[str]:
     """Преобразует относительный путь TikWM в полный URL."""
     if not url:
@@ -143,13 +180,19 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 # 2. YOUTUBE (Мульти-стратегия с Android/iOS InnerTube и cookies)
 # ==========================================
 def download_youtube_via_external(url: str, output_dir: str, is_audio: bool = False) -> Optional[tuple[dict, str]]:
-    """Резервное скачивание через проверенные внешние API (Cobalt/Invidious), если все клиенты yt-dlp заблокированы датацентровым баном."""
+    """Резервное скачивание через проверенные внешние API (Cobalt/Y2Mate), если все клиенты yt-dlp заблокированы датацентровым баном."""
     logger.info("Пробуем резервное внешнее скачивание YouTube через API...")
+    m = YOUTUBE_URL_REGEX.search(url)
+    video_id = url.split("v=")[-1].split("&")[0] if "v=" in url else url.split("/")[-1].split("?")[0]
+
+    # 1. Попытка через Cobalt API mirrors
     cobalt_mirrors = [
-        "https://co.wuk.sh/api/json",
+        "https://taivideo.websites.com.vn/",
+        "https://capi.3kh0.net/",
+        "https://cobalt-backend.canine.tools/",
+        "https://cobalt.api.scidsg.org/api/json",
         "https://api.qwk.app",
-        "https://cobalt-api.kwiatekm.tokyo",
-        "https://cobalt.xy2401.com"
+        "https://co.wuk.sh/api/json",
     ]
     payload = {
         "url": url,
@@ -179,12 +222,67 @@ def download_youtube_via_external(url: str, output_dir: str, is_audio: bool = Fa
                     with urllib.request.urlopen(d_req, timeout=45) as dr, open(out_file, "wb") as f:
                         shutil.copyfileobj(dr, f)
                     if os.path.exists(out_file) and os.path.getsize(out_file) > 1000:
-                        logger.info(f"Успешно скачано через внешний API {inst}")
-                        info = {"title": "YouTube Video", "id": "external", "uploader": "YouTube"}
+                        logger.info(f"Успешно скачано через внешний Cobalt API {inst}")
+                        info = {"title": res.get("filename") or "YouTube Media", "id": video_id, "uploader": "YouTube"}
                         return info, out_file
         except Exception as e:
-            logger.warning(f"Ошибка внешнего API {inst}: {e}")
+            logger.debug(f"Ошибка внешнего API {inst}: {e}")
             continue
+
+    # 2. Попытка через Y2Mate API
+    try:
+        y2_url = "https://www.y2mate.com/mates/analyzeV2/ajax"
+        data = urllib.parse.urlencode({
+            "k_query": f"https://www.youtube.com/watch?v={video_id}",
+            "k_page": "home",
+            "hl": "en",
+            "q_auto": "0"
+        }).encode("utf-8")
+        y2_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://www.y2mate.com",
+            "Referer": "https://www.y2mate.com/en949"
+        }
+        y2_req = urllib.request.Request(y2_url, data=data, headers=y2_headers)
+        with urllib.request.urlopen(y2_req, timeout=10) as r:
+            res_json = json.loads(r.read().decode("utf-8"))
+            title = res_json.get("title", "YouTube Media")
+            links = res_json.get("links", {})
+            choice = None
+            if is_audio:
+                mp3_links = links.get("mp3", {})
+                for k, v in mp3_links.items():
+                    choice = v
+                    break
+            else:
+                mp4_links = links.get("mp4", {})
+                for k, v in mp4_links.items():
+                    if v.get("q_text") in ["720p", "480p", "360p"]:
+                        choice = v
+                        break
+                if not choice and mp4_links:
+                    choice = list(mp4_links.values())[0]
+
+            if choice and choice.get("k"):
+                conv_url = "https://www.y2mate.com/mates/convertV2/index"
+                c_data = urllib.parse.urlencode({"k": choice["k"], "vid": video_id}).encode("utf-8")
+                c_req = urllib.request.Request(conv_url, data=c_data, headers=y2_headers)
+                with urllib.request.urlopen(c_req, timeout=15) as cr:
+                    c_res = json.loads(cr.read().decode("utf-8"))
+                    dlink = c_res.get("dlink")
+                    if dlink:
+                        ext = "mp3" if is_audio else "mp4"
+                        out_file = os.path.join(output_dir, f"y2_{int(time.time())}.{ext}")
+                        dl_req = urllib.request.Request(dlink, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(dl_req, timeout=45) as dr, open(out_file, "wb") as f:
+                            shutil.copyfileobj(dr, f)
+                        if os.path.exists(out_file) and os.path.getsize(out_file) > 1000:
+                            logger.info("Успешно скачано через Y2Mate API")
+                            info = {"title": title, "id": video_id, "uploader": "YouTube"}
+                            return info, out_file
+    except Exception as e:
+        logger.debug(f"Ошибка Y2Mate API: {e}")
 
     return None
 
@@ -193,14 +291,17 @@ def download_youtube_video(url: str, output_dir: str):
     """
     Скачивание YouTube-видео:
     Попытка 1: web_embedded + remote_components ejs:github (обходит PO Token и датацентровые баны Google)
-    Попытка 2: web_safari (HLS без обязательного PO Token)
-    Попытка 3: tv_samsung_pure
-    Попытка 4: visionos_pure
-    Попытка 5: android_direct
-    Попытка 6: tv_samsung с cookies (если есть)
-    Попытка 7: Резервное внешнее скачивание (Cobalt API)
+    Попытка 2: android_vr (InnerTube без жесткого PO Token)
+    Попытка 3: mweb (мобильная веб-версия без жесткого PO Token)
+    Попытка 4: web_safari (HLS без обязательного PO Token)
+    Попытка 5: tv_samsung_pure
+    Попытка 6: visionos_pure
+    Попытка 7: android_direct
+    Попытка 8: tv_samsung с cookies (если есть)
+    Попытка 9: Резервное внешнее скачивание (Cobalt / Y2Mate API)
     """
     ffmpeg_exe = get_ffmpeg_path()
+    setup_deno_path()
     proxy = os.getenv("YOUTUBE_PROXY")
     cookie_file = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
@@ -226,7 +327,7 @@ def download_youtube_video(url: str, output_dir: str):
     )
 
     strategies = [
-        # 1. Web Embedded с удаленными компонентами для решения JS-челленджей (100% не требует PO Token)
+        # 1. Web Embedded с удаленными компонентами для решения JS-челленджей (обходит PO Token)
         {
             "name": "web_embedded",
             "opts": {
@@ -241,7 +342,35 @@ def download_youtube_video(url: str, output_dir: str):
                 "noplaylist": True,
             }
         },
-        # 2. Web Safari (HLS потоки без строгой проверки PO Token)
+        # 2. Android VR InnerTube клиент
+        {
+            "name": "android_vr",
+            "opts": {
+                "format": "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/18/best[ext=mp4]/best",
+                "merge_output_format": "mp4",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android_vr"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 3. MWeb клиент
+        {
+            "name": "mweb",
+            "opts": {
+                "format": "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/18/best[ext=mp4]/best",
+                "merge_output_format": "mp4",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["mweb"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 4. Web Safari (HLS потоки без строгой проверки PO Token)
         {
             "name": "web_safari",
             "opts": {
@@ -256,7 +385,7 @@ def download_youtube_video(url: str, output_dir: str):
                 "noplaylist": True,
             }
         },
-        # 3. TV Samsung без cookies
+        # 5. TV Samsung без cookies
         {
             "name": "tv_samsung_pure",
             "opts": {
@@ -271,7 +400,7 @@ def download_youtube_video(url: str, output_dir: str):
                 "noplaylist": True,
             }
         },
-        # 4. VisionOS без cookies
+        # 6. VisionOS без cookies
         {
             "name": "visionos_pure",
             "opts": {
@@ -286,7 +415,7 @@ def download_youtube_video(url: str, output_dir: str):
                 "noplaylist": True,
             }
         },
-        # 5. Мобильный Android InnerTube
+        # 7. Мобильный Android InnerTube
         {
             "name": "android_direct",
             "opts": {
@@ -361,6 +490,7 @@ def download_youtube_audio(video_id: str, output_dir: str):
     """Скачивание аудиодорожки с YouTube через web_embedded, TV API или cookies."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
+    setup_deno_path()
     cookie_file = os.path.join(os.path.dirname(__file__), "cookies.txt")
     env_cookies = os.getenv("YOUTUBE_COOKIES")
     if env_cookies:
@@ -371,7 +501,7 @@ def download_youtube_audio(video_id: str, output_dir: str):
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
     strategies = [
-        # 1. Web Embedded аудио (чистый m4a поток, 100% без капчи и PO Token)
+        # 1. Web Embedded аудио (чистый m4a поток, без капчи и PO Token)
         {
             "name": "web_embedded_audio",
             "opts": {
@@ -385,7 +515,33 @@ def download_youtube_audio(video_id: str, output_dir: str):
                 "noplaylist": True,
             }
         },
-        # 2. TV Samsung аудио
+        # 2. Android VR аудио
+        {
+            "name": "android_vr_audio",
+            "opts": {
+                "format": "bestaudio[ext=m4a]/bestaudio/140/18/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android_vr"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 3. MWeb аудио
+        {
+            "name": "mweb_audio",
+            "opts": {
+                "format": "bestaudio[ext=m4a]/bestaudio/140/18/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["mweb"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 4. TV Samsung аудио
         {
             "name": "tv_samsung_audio",
             "opts": {
@@ -399,7 +555,7 @@ def download_youtube_audio(video_id: str, output_dir: str):
                 "noplaylist": True,
             }
         },
-        # 3. VisionOS аудио
+        # 5. VisionOS аудио
         {
             "name": "visionos_audio",
             "opts": {
@@ -413,7 +569,7 @@ def download_youtube_audio(video_id: str, output_dir: str):
                 "noplaylist": True,
             }
         },
-        # 4. Android InnerTube
+        # 6. Android InnerTube
         {
             "name": "android_audio",
             "opts": {
@@ -986,7 +1142,9 @@ async def start_health_check_server():
         cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
         c_exists = os.path.exists(cookie_path)
         c_size = os.path.getsize(cookie_path) if c_exists else 0
-        return web.Response(text=f"Bot v13-universal-embedded-yt | cookies: {c_exists} ({c_size}b)")
+        deno_ok = bool(shutil.which("deno"))
+        ffmpeg_ok = bool(get_ffmpeg_path())
+        return web.Response(text=f"Bot v14-universal-embedded-yt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
@@ -1156,12 +1314,13 @@ async def start_health_check_server():
             except Exception as e:
                 results["savefrom"] = {"status": "error", "error": str(e)}
 
-        # 5. Test yt-dlp clients (android_vr, web_embedded)
-        for cl in ["android_vr", "web_embedded"]:
+        # 5. Test yt-dlp clients (android_vr, web_embedded, mweb)
+        for cl in ["android_vr", "web_embedded", "mweb"]:
             try:
                 ydl_opts = {
                     "format": "bestvideo[height<=720]+bestaudio/18/best",
                     "extractor_args": {"youtube": {"player_client": [cl]}},
+                    "remote_components": ["ejs:github"] if cl == "web_embedded" else [],
                     "skip_download": True,
                     "quiet": True,
                     "no_warnings": True,
