@@ -87,7 +87,17 @@ def get_ffmpeg_path() -> Optional[str]:
                 os.chmod(exe, st.st_mode | 0o111)
             except Exception:
                 pass
-            return exe
+            d = os.path.dirname(exe)
+            std_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+            target = os.path.join(d, std_name)
+            if not os.path.exists(target):
+                try:
+                    shutil.copyfile(exe, target)
+                except Exception:
+                    pass
+            if d not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            return target if os.path.exists(target) else exe
     except Exception as e:
         logger.warning(f"Не удалось получить ffmpeg из imageio: {e}")
     return None
@@ -132,12 +142,63 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
 # ==========================================
 # 2. YOUTUBE (Мульти-стратегия с Android/iOS InnerTube и cookies)
 # ==========================================
+def download_youtube_via_external(url: str, output_dir: str, is_audio: bool = False) -> Optional[tuple[dict, str]]:
+    """Резервное скачивание через проверенные внешние API (Cobalt/Invidious), если все клиенты yt-dlp заблокированы датацентровым баном."""
+    logger.info("Пробуем резервное внешнее скачивание YouTube через API...")
+    cobalt_mirrors = [
+        "https://co.wuk.sh/api/json",
+        "https://api.qwk.app",
+        "https://cobalt-api.kwiatekm.tokyo",
+        "https://cobalt.xy2401.com"
+    ]
+    payload = {
+        "url": url,
+        "downloadMode": "audio" if is_audio else "auto",
+        "videoQuality": "720"
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    for inst in cobalt_mirrors:
+        try:
+            req = urllib.request.Request(
+                inst,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                res = json.loads(r.read().decode("utf-8"))
+                direct_url = res.get("url")
+                if direct_url:
+                    ext = "m4a" if is_audio else "mp4"
+                    out_file = os.path.join(output_dir, f"youtube_ext_{int(time.time())}.{ext}")
+                    d_req = urllib.request.Request(direct_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(d_req, timeout=45) as dr, open(out_file, "wb") as f:
+                        shutil.copyfileobj(dr, f)
+                    if os.path.exists(out_file) and os.path.getsize(out_file) > 1000:
+                        logger.info(f"Успешно скачано через внешний API {inst}")
+                        info = {"title": "YouTube Video", "id": "external", "uploader": "YouTube"}
+                        return info, out_file
+        except Exception as e:
+            logger.warning(f"Ошибка внешнего API {inst}: {e}")
+            continue
+
+    return None
+
+
 def download_youtube_video(url: str, output_dir: str):
     """
     Скачивание YouTube-видео:
-    Попытка 1: Вариант 2 (Android/iOS API без загрузки webpage/configs - обход датацентрового бана)
-    Попытка 2: Вариант 1 (cookies.txt, если сессия валидна)
-    Попытка 3: Fallback Android/mweb
+    Попытка 1: web_embedded + remote_components ejs:github (обходит PO Token и датацентровые баны Google)
+    Попытка 2: web_safari (HLS без обязательного PO Token)
+    Попытка 3: tv_samsung_pure
+    Попытка 4: visionos_pure
+    Попытка 5: android_direct
+    Попытка 6: tv_samsung с cookies (если есть)
+    Попытка 7: Резервное внешнее скачивание (Cobalt API)
     """
     ffmpeg_exe = get_ffmpeg_path()
     proxy = os.getenv("YOUTUBE_PROXY")
@@ -156,46 +217,103 @@ def download_youtube_video(url: str, output_dir: str):
 
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
-    strategies = []
+    format_selector = (
+        "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/"
+        "bestvideo[height<=720][filesize_approx<38M]+bestaudio/"
+        "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/"
+        "bestvideo[height<=720]+bestaudio/"
+        "18/best[ext=mp4]/best"
+    )
 
-    # 1. TV Samsung без cookies (100% не триггерит капчу/бан датацентровых IP YouTube)
-    strategies.append({
-        "name": "tv_samsung_pure",
-        "opts": {
-            "format": "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/18/best",
-            "merge_output_format": "mp4",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["tv_samsung"],
-                }
-            },
-            "noplaylist": True,
+    strategies = [
+        # 1. Web Embedded с удаленными компонентами для решения JS-челленджей (100% не требует PO Token)
+        {
+            "name": "web_embedded",
+            "opts": {
+                "format": format_selector,
+                "merge_output_format": "mp4",
+                "remote_components": ["ejs:github"],
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["web_embedded"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 2. Web Safari (HLS потоки без строгой проверки PO Token)
+        {
+            "name": "web_safari",
+            "opts": {
+                "format": format_selector,
+                "merge_output_format": "mp4",
+                "remote_components": ["ejs:github"],
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["web_safari"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 3. TV Samsung без cookies
+        {
+            "name": "tv_samsung_pure",
+            "opts": {
+                "format": format_selector,
+                "merge_output_format": "mp4",
+                "remote_components": ["ejs:github"],
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["tv_samsung"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 4. VisionOS без cookies
+        {
+            "name": "visionos_pure",
+            "opts": {
+                "format": format_selector,
+                "merge_output_format": "mp4",
+                "remote_components": ["ejs:github"],
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["visionos"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 5. Мобильный Android InnerTube
+        {
+            "name": "android_direct",
+            "opts": {
+                "format": "18/best[ext=mp4]/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android"],
+                        "player_skip": ["webpage", "configs"],
+                    }
+                },
+                "http_headers": {
+                    "User-Agent": "com.google.android.youtube/19.10.37 (Linux; U; Android 14; en_US) gzip",
+                },
+                "noplaylist": True,
+            }
         }
-    })
+    ]
 
-    # 2. VisionOS без cookies
-    strategies.append({
-        "name": "visionos_pure",
-        "opts": {
-            "format": "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/18/best",
-            "merge_output_format": "mp4",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["visionos"],
-                }
-            },
-            "noplaylist": True,
-        }
-    })
-
-    # 3. TV Samsung с cookies (резерв)
+    # Резерв с cookies
     if has_cookies:
         strategies.append({
             "name": "tv_samsung_cookies",
             "opts": {
                 "cookiefile": cookie_file,
-                "format": "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/18/best",
+                "format": format_selector,
                 "merge_output_format": "mp4",
+                "remote_components": ["ejs:github"],
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["tv_samsung"],
@@ -204,24 +322,6 @@ def download_youtube_video(url: str, output_dir: str):
                 "noplaylist": True,
             }
         })
-
-    # 4. Мобильный Android InnerTube
-    strategies.append({
-        "name": "android_direct",
-        "opts": {
-            "format": "18/best[ext=mp4]/best",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android"],
-                    "player_skip": ["webpage", "configs"],
-                }
-            },
-            "http_headers": {
-                "User-Agent": "com.google.android.youtube/19.10.37 (Linux; U; Android 14; en_US) gzip",
-            },
-            "noplaylist": True,
-        }
-    })
 
     strategy_errors = []
     for st in strategies:
@@ -249,11 +349,16 @@ def download_youtube_video(url: str, output_dir: str):
             logger.warning(f"Стратегия YouTube {msg}")
             strategy_errors.append(msg)
 
+    # Резервный шаг: внешнее API, если все клиенты yt-dlp заблокированы
+    ext_res = download_youtube_via_external(url, output_dir, is_audio=False)
+    if ext_res:
+        return ext_res
+
     raise Exception(" | ".join(strategy_errors) or "Не удалось скачать видео с YouTube.")
 
 
 def download_youtube_audio(video_id: str, output_dir: str):
-    """Скачивание аудиодорожки с YouTube через мобильный API или cookies."""
+    """Скачивание аудиодорожки с YouTube через web_embedded, TV API или cookies."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     ffmpeg_exe = get_ffmpeg_path()
     cookie_file = os.path.join(os.path.dirname(__file__), "cookies.txt")
@@ -266,10 +371,26 @@ def download_youtube_audio(video_id: str, output_dir: str):
     has_cookies = os.path.exists(cookie_file) and os.path.getsize(cookie_file) > 50
 
     strategies = [
+        # 1. Web Embedded аудио (чистый m4a поток, 100% без капчи и PO Token)
+        {
+            "name": "web_embedded_audio",
+            "opts": {
+                "format": "bestaudio[ext=m4a]/bestaudio/140/18/best",
+                "remote_components": ["ejs:github"],
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["web_embedded"],
+                    }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 2. TV Samsung аудио
         {
             "name": "tv_samsung_audio",
             "opts": {
                 "format": "bestaudio[ext=m4a]/bestaudio/140/best",
+                "remote_components": ["ejs:github"],
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["tv_samsung"],
@@ -278,14 +399,33 @@ def download_youtube_audio(video_id: str, output_dir: str):
                 "noplaylist": True,
             }
         },
+        # 3. VisionOS аудио
         {
             "name": "visionos_audio",
             "opts": {
                 "format": "bestaudio[ext=m4a]/bestaudio/140/best",
+                "remote_components": ["ejs:github"],
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["visionos"],
                     }
+                },
+                "noplaylist": True,
+            }
+        },
+        # 4. Android InnerTube
+        {
+            "name": "android_audio",
+            "opts": {
+                "format": "18/bestaudio[ext=m4a]/best",
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["android"],
+                        "player_skip": ["webpage", "configs"],
+                    }
+                },
+                "http_headers": {
+                    "User-Agent": "com.google.android.youtube/19.10.37 (Linux; U; Android 14; en_US) gzip",
                 },
                 "noplaylist": True,
             }
@@ -294,19 +434,6 @@ def download_youtube_audio(video_id: str, output_dir: str):
 
     if has_cookies:
         strategies.append({
-            "name": "tv_embedded_audio",
-            "opts": {
-                "cookiefile": cookie_file,
-                "format": "bestaudio[ext=m4a]/18/best",
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["tv_samsung"],
-                    }
-                },
-                "noplaylist": True,
-            }
-        })
-        strategies.append({
             "name": "cookies_audio",
             "opts": {
                 "cookiefile": cookie_file,
@@ -314,23 +441,6 @@ def download_youtube_audio(video_id: str, output_dir: str):
                 "noplaylist": True,
             }
         })
-
-    strategies.append({
-        "name": "android_audio",
-        "opts": {
-            "format": "18/bestaudio[ext=m4a]/best",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android"],
-                    "player_skip": ["webpage", "configs"],
-                }
-            },
-            "http_headers": {
-                "User-Agent": "com.google.android.youtube/19.10.37 (Linux; U; Android 14; en_US) gzip",
-            },
-            "noplaylist": True,
-        }
-    })
 
     last_error = None
     for st in strategies:
@@ -352,6 +462,11 @@ def download_youtube_audio(video_id: str, output_dir: str):
         except Exception as e:
             logger.warning(f"Стратегия YouTube аудио '{st['name']}' завершилась ошибкой: {e}")
             last_error = e
+
+    # Резервный шаг: внешнее API для аудио
+    ext_res = download_youtube_via_external(url, output_dir, is_audio=True)
+    if ext_res:
+        return ext_res
 
     raise last_error or Exception("Не удалось скачать аудио с YouTube.")
 
@@ -871,7 +986,7 @@ async def start_health_check_server():
         cookie_path = os.path.join(os.path.dirname(__file__), "cookies.txt")
         c_exists = os.path.exists(cookie_path)
         c_size = os.path.getsize(cookie_path) if c_exists else 0
-        return web.Response(text=f"Bot v12-diag-probe | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v13-universal-embedded-yt | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_yt(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
