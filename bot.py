@@ -275,53 +275,65 @@ def download_youtube_audio(video_id: str, output_dir: str):
 
 
 # ==========================================
-# 3. PINTEREST
+# 3. PINTEREST (yt-dlp + ffmpeg для видео и фото)
 # ==========================================
-async def fetch_pinterest_media(url: str) -> Optional[dict]:
-    """Парсинг видео или изображения из Pinterest (с разворачиванием pin.it)."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+def download_pinterest_media(url: str, output_dir: str) -> dict:
+    """
+    Скачивание Pinterest (видео со звуком или фото максимального качества) через yt-dlp + ffmpeg.
+    1. Автоматически разворачивает короткие ссылки pin.it.
+    2. Извлекает метаданные пина через PinResource API Pinterest.
+    3. Если есть видео — скачивает и склеивает со звуком через ffmpeg.
+    4. Если это фото — находит оригинальное фото (без иконок/логотипов интерфейса).
+    """
+    ffmpeg_exe = get_ffmpeg_path()
+    ydl_opts = {
+        "format": "bestvideo+bestaudio/best",
+        "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
     }
+    if ffmpeg_exe:
+        ydl_opts["ffmpeg_location"] = ffmpeg_exe
 
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20), headers=headers) as session:
-            async with session.get(url, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    return None
-                html = await resp.text()
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        video_formats = [f for f in info.get("formats", []) if f.get("vcodec") != "none"]
 
-            # 1. Прямое видео Pinterest CDN (720p/1080p)
-            vids = re.findall(r'https?://v[0-9]?\.pinimg\.com/videos/[^\s"\'\\]+\.mp4', html)
-            if vids:
-                best_vid = vids[0]
-                for v in vids:
-                    if "720p" in v or "1080p" in v:
-                        best_vid = v
-                        break
-                return {"type": "video", "url": best_vid}
+        title = info.get("title") or "Pinterest"
+        clean_title = (title[:180] + "...") if len(title) > 180 else title
 
-            # 2. Оригинальное фото (originals)
-            imgs = re.findall(r'https?://i\.pinimg\.com/originals/[^\s"\'\\]+\.(?:jpg|jpeg|png|webp)', html)
-            if imgs:
-                return {"type": "image", "url": imgs[0]}
+        if video_formats:
+            # Есть видео - скачиваем
+            ydl.download([url])
+            video_id = info.get("id")
+            for f in os.listdir(output_dir):
+                if str(video_id) in f:
+                    return {
+                        "type": "video",
+                        "file_path": os.path.join(output_dir, f),
+                        "title": clean_title
+                    }
 
-            # 3. Резервный поиск через yt-dlp
-            def extract_pin_ytdlp():
-                opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if info.get("url"):
-                        return {"type": "video", "url": info.get("url")}
-                return None
+        # Если фото - находим оригинальное изображение пина
+        thumbnails = info.get("thumbnails", [])
+        img_url = None
+        if thumbnails:
+            for t in reversed(thumbnails):
+                t_url = t.get("url", "")
+                if "originals" in t_url or "736x" in t_url:
+                    img_url = t_url
+                    break
+            if not img_url:
+                img_url = thumbnails[-1].get("url")
 
-            res = await asyncio.to_thread(extract_pin_ytdlp)
-            if res:
-                return res
+        if not img_url:
+            img_url = info.get("thumbnail") or info.get("url")
 
-    except Exception as e:
-        logger.error(f"Ошибка Pinterest: {e}")
-    return None
+        return {
+            "type": "image",
+            "url": img_url,
+            "title": clean_title
+        }
 
 
 # ==========================================
@@ -652,32 +664,47 @@ async def handle_pinterest(message: types.Message):
     status_msg = await message.reply("⏳ Загружаю из Pinterest...")
 
     try:
-        media = await fetch_pinterest_media(pin_url)
+        await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
 
-        if not media or not media.get("url"):
-            await status_msg.edit_text("❌ Не удалось извлечь медиа из Pinterest. Проверьте ссылку.")
-            return
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            res = await asyncio.to_thread(download_pinterest_media, pin_url, tmp_dir)
 
-        media_url = media["url"]
-        caption = "📌 Pinterest"
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть в Pinterest", url=pin_url)]])
+            if not res:
+                await status_msg.edit_text("❌ Не удалось извлечь медиа из Pinterest. Проверьте ссылку.")
+                return
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+            caption = f"📌 {res.get('title') or 'Pinterest'}"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть в Pinterest", url=pin_url)]])
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), headers=headers) as session:
-            async with session.get(media_url) as resp:
-                if resp.status == 200:
-                    media_bytes = await resp.read()
-                    if media.get("type") == "image":
-                        photo_file = BufferedInputFile(media_bytes, filename="pinterest.jpg")
-                        await message.reply_photo(photo=photo_file, caption=caption, reply_markup=keyboard)
-                    else:
-                        video_file = BufferedInputFile(media_bytes, filename="pinterest.mp4")
-                        await message.reply_video(video=video_file, caption=caption, reply_markup=keyboard)
-                else:
-                    await message.reply_video(video=media_url, caption=caption, reply_markup=keyboard)
+            if res.get("type") == "video":
+                file_path = res["file_path"]
+                file_size = os.path.getsize(file_path)
+                if file_size > MAX_TELEGRAM_FILE_SIZE:
+                    await status_msg.edit_text(
+                        f"❌ Видео слишком большое ({file_size // (1024 * 1024)} МБ).\n"
+                        "Telegram разрешает ботам отправлять файлы размером не более 50 МБ."
+                    )
+                    return
+
+                video_file = FSInputFile(file_path, filename="pinterest_video.mp4")
+                await message.reply_video(video=video_file, caption=caption, reply_markup=keyboard)
+            else:
+                img_url = res.get("url")
+                if not img_url:
+                    await status_msg.edit_text("❌ Не удалось найти изображение в пине.")
+                    return
+
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), headers=headers) as session:
+                    async with session.get(img_url) as resp:
+                        if resp.status == 200:
+                            photo_bytes = await resp.read()
+                            photo_file = BufferedInputFile(photo_bytes, filename="pinterest.jpg")
+                            await message.reply_photo(photo=photo_file, caption=caption, reply_markup=keyboard)
+                        else:
+                            await message.reply_photo(photo=img_url, caption=caption, reply_markup=keyboard)
 
         await status_msg.delete()
 
@@ -777,10 +804,33 @@ async def start_health_check_server():
         except Exception as e:
             return web.json_response({"status": "error", "message": str(e)}, status=500)
 
+    async def handle_test_pin(request):
+        url = request.query.get("url", "https://pin.it/5lleYI7Rp")
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                res = await asyncio.to_thread(download_pinterest_media, url, tmp_dir)
+                if res.get("type") == "video":
+                    size_mb = os.path.getsize(res["file_path"]) / (1024 * 1024)
+                    return web.json_response({
+                        "status": "success",
+                        "type": "video",
+                        "title": res.get("title"),
+                        "size_mb": round(size_mb, 2)
+                    })
+                return web.json_response({
+                    "status": "success",
+                    "type": "image",
+                    "title": res.get("title"),
+                    "url": res.get("url")
+                })
+        except Exception as e:
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
     app.router.add_get("/test-yt", handle_test_yt)
     app.router.add_get("/test-ig", handle_test_ig)
+    app.router.add_get("/test-pin", handle_test_pin)
 
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
