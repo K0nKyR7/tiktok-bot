@@ -160,7 +160,7 @@ def download_youtube_video(url: str, output_dir: str):
     strategies.append({
         "name": "tv_samsung_pure",
         "opts": {
-            "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/18/best",
+            "format": "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/18/best",
             "merge_output_format": "mp4",
             "extractor_args": {
                 "youtube": {
@@ -175,7 +175,7 @@ def download_youtube_video(url: str, output_dir: str):
     strategies.append({
         "name": "visionos_pure",
         "opts": {
-            "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/18/best",
+            "format": "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/18/best",
             "merge_output_format": "mp4",
             "extractor_args": {
                 "youtube": {
@@ -192,7 +192,7 @@ def download_youtube_video(url: str, output_dir: str):
             "name": "tv_samsung_cookies",
             "opts": {
                 "cookiefile": cookie_file,
-                "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/18/best",
+                "format": "bestvideo[filesize<=38M][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/18/best",
                 "merge_output_format": "mp4",
                 "extractor_args": {
                     "youtube": {
