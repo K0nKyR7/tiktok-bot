@@ -154,38 +154,13 @@ def to_absolute_url(url: Optional[str]) -> Optional[str]:
 # 1. TIKTOK
 # ==========================================
 async def fetch_tiktok_data(url: str) -> Optional[dict]:
-    """Запрашивает данные видео через TikWM GET API + официальный Aweme Mobile API + yt-dlp."""
-    encoded_url = urllib.parse.quote(url)
-    headers = {
+    """Запрашивает данные видео через официальный мобильный Aweme API TikTok + TikWM GET + yt-dlp."""
+    headers_browser = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
     }
 
-    # Способ 1: TikWM API через GET (обходит WAF/блокировки Cloudflare для облачных серверов)
-    get_hosts = [
-        f"https://www.tikwm.com/api/?url={encoded_url}&hd=1",
-        f"https://tikwm.com/api/?url={encoded_url}&hd=1",
-    ]
-    for get_url in get_hosts:
-        for attempt in range(2):
-            try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), headers=headers) as session:
-                    async with session.get(get_url) as resp:
-                        if resp.status == 200:
-                            data = await resp.json(content_type=None)
-                            if data.get("code") == 0 and data.get("data"):
-                                logger.info(f"TikWM GET успешно получил данные для TikTok {url}")
-                                return data.get("data")
-                            msg = data.get("msg") or ""
-                            logger.warning(f"TikWM GET ({get_url}) попытка {attempt+1}: {msg}")
-                            if "Free Api Limit" in msg or "1 request/second" in msg:
-                                await asyncio.sleep(1.2)
-                                continue
-            except Exception as e:
-                logger.warning(f"Ошибка TikWM GET ({get_url}): {e}")
-                await asyncio.sleep(0.5)
-
-    # Способ 2: Официальный мобильный API TikTok (Aweme Feed API)
+    # Способ 1: Официальный мобильный API TikTok (Aweme Mobile API) с параметрами Android
     try:
         video_id = None
         vid_match = re.search(r"/video/(\d+)", url) or re.search(r"(\d{15,22})", url)
@@ -201,13 +176,22 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
                         video_id = vid_match.group(1)
 
         if video_id:
-            logger.info(f"Пробуем резервный TikTok Aweme Feed API для video_id={video_id}...")
-            aweme_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={video_id}"
+            logger.info(f"Пробуем официальный TikTok Aweme Mobile API для video_id={video_id}...")
+            ts = int(time.time())
+            aweme_url = (
+                f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/"
+                f"?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3"
+                f"&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718"
+                f"&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google"
+                f"&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420"
+                f"&os_version=13&os_api=33&carrier_region=US&sys_region=US&region=US"
+                f"&app_name=musical_ly&app_language=en&language=en&channel=googleplay&ac=wifi&aid=1233"
+            )
             aweme_headers = {
-                "User-Agent": "okhttp/3.10.0.1",
+                "User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)",
                 "Accept-Encoding": "gzip",
             }
-            async with aiohttp.ClientSession(headers=aweme_headers, timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with aiohttp.ClientSession(headers=aweme_headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
                 async with s.get(aweme_url) as r:
                     if r.status == 200:
                         raw = await r.read()
@@ -216,12 +200,20 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
                         feed_json = json.loads(raw.decode("utf-8", errors="ignore"))
                         aweme_list = feed_json.get("aweme_list", [])
                         if aweme_list:
-                            item = aweme_list[0]
-                            desc = item.get("desc") or "TikTok video"
+                            # Ищем точное совпадение по ID или берем первое
+                            target_item = None
+                            for it in aweme_list:
+                                if str(it.get("aweme_id")) == str(video_id):
+                                    target_item = it
+                                    break
+                            if not target_item:
+                                target_item = aweme_list[0]
 
-                            # Фото-карусель
+                            desc = target_item.get("desc") or "TikTok video"
+
+                            # Проверка фото-карусели
                             images = []
-                            img_post = item.get("image_post_info")
+                            img_post = target_item.get("image_post_info")
                             if img_post and img_post.get("images"):
                                 for img_obj in img_post.get("images", []):
                                     d_img = img_obj.get("display_image", {})
@@ -229,10 +221,12 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
                                     if u_list:
                                         images.append(u_list[0])
 
-                            v_urls = item.get("video", {}).get("play_addr", {}).get("url_list", [])
-                            m_url = item.get("music", {}).get("play_url", {}).get("uri")
-                            if not m_url and item.get("music", {}).get("play_url", {}).get("url_list"):
-                                m_url = item.get("music", {})["play_url"]["url_list"][0]
+                            v_urls = target_item.get("video", {}).get("play_addr", {}).get("url_list", [])
+                            m_obj = target_item.get("music") or {}
+                            m_play_info = m_obj.get("play_url") or {}
+                            m_url = m_play_info.get("uri")
+                            if not m_url and m_play_info.get("url_list"):
+                                m_url = m_play_info["url_list"][0]
 
                             result = {
                                 "id": video_id,
@@ -241,21 +235,42 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
                                 "hdplay": v_urls[-1] if len(v_urls) > 1 else (v_urls[0] if v_urls else None),
                                 "music": m_url or (v_urls[0] if v_urls else None),
                                 "music_info": {
-                                    "title": item.get("music", {}).get("title") or "Original Sound",
-                                    "author": item.get("music", {}).get("author") or "",
+                                    "title": m_obj.get("title") or "Original Sound",
+                                    "author": m_obj.get("author") or target_item.get("author", {}).get("nickname") or "",
                                     "play": m_url,
                                 },
                                 "author": {
-                                    "nickname": item.get("author", {}).get("nickname") or "",
-                                    "unique_id": item.get("author", {}).get("unique_id") or "",
+                                    "nickname": target_item.get("author", {}).get("nickname") or "",
+                                    "unique_id": target_item.get("author", {}).get("unique_id") or "",
                                 }
                             }
                             if images:
                                 result["images"] = images
-                            logger.info(f"TikTok Aweme Feed API успешно получил видео {video_id}")
+                            logger.info(f"TikTok Aweme Mobile API успешно извлек данные для video_id={video_id}")
                             return result
     except Exception as e:
-        logger.warning(f"Ошибка Aweme API fallback: {e}")
+        logger.warning(f"Ошибка Aweme Mobile API: {e}")
+
+    # Способ 2: TikWM API через GET
+    try:
+        encoded_url = urllib.parse.quote(url)
+        get_hosts = [
+            f"https://www.tikwm.com/api/?url={encoded_url}&hd=1",
+            f"https://tikwm.com/api/?url={encoded_url}&hd=1",
+        ]
+        for get_url in get_hosts:
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), headers=headers_browser) as session:
+                    async with session.get(get_url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            if data.get("code") == 0 and data.get("data"):
+                                logger.info(f"TikWM GET успешно получил данные для TikTok {url}")
+                                return data.get("data")
+            except Exception as e:
+                logger.warning(f"Ошибка TikWM GET ({get_url}): {e}")
+    except Exception as e:
+        logger.warning(f"Ошибка TikWM: {e}")
 
     # Способ 3: Резерв через yt-dlp
     logger.info("Пробуем резервное получение TikTok через yt-dlp...")
@@ -265,6 +280,9 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=False)
@@ -1411,7 +1429,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v25-test-regions | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v26-tiktok-aweme-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1453,42 +1471,18 @@ async def start_health_check_server():
             except Exception as e:
                 debug["proxied_tikwm"][pname] = {"err": str(e)}
 
-        # 2. Test Aweme with different regions (US, BY, KZ, DE)
-        if video_id:
-            ts = int(time.time())
-            regions = ["US", "BY", "KZ", "DE"]
-            debug["aweme_regions"] = {}
-            for reg in regions:
-                try:
-                    aweme_url = (
-                        f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/"
-                        f"?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3"
-                        f"&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718"
-                        f"&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google"
-                        f"&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420"
-                        f"&os_version=13&os_api=33&carrier_region={reg}&sys_region={reg}&region={reg}"
-                        f"&app_name=musical_ly&app_language=en&language=en&channel=googleplay&ac=wifi&aid=1233"
-                    )
-                    headers = {
-                        "User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)",
-                        "Accept-Encoding": "gzip",
-                    }
-                    async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as s:
-                        async with s.get(aweme_url) as r:
-                            debug["aweme_regions"][reg] = {"status": r.status}
-                            if r.status == 200:
-                                raw = await r.read()
-                                if raw.startswith(b"\x1f\x8b"):
-                                    raw = gzip.decompress(raw)
-                                a_data = json.loads(raw.decode("utf-8", errors="ignore"))
-                                aweme_list = a_data.get("aweme_list", [])
-                                debug["aweme_regions"][reg]["list_len"] = len(aweme_list)
-                                if aweme_list:
-                                    debug["aweme_regions"][reg]["desc"] = aweme_list[0].get("desc")
-                                    v_obj = aweme_list[0].get("video") or {}
-                                    debug["aweme_regions"][reg]["has_play"] = bool(v_obj.get("play_addr", {}).get("url_list"))
-                except Exception as e:
-                    debug["aweme_regions"][reg] = {"err": repr(e)}
+        # 2. Test full fetch_tiktok_data function
+        try:
+            full_data = await fetch_tiktok_data(url)
+            debug["fetch_tiktok_data"] = {
+                "success": bool(full_data and (full_data.get("play") or full_data.get("images"))),
+                "title": full_data.get("title") if full_data else None,
+                "has_play": bool(full_data.get("play")) if full_data else False,
+                "has_music": bool(full_data.get("music")) if full_data else False,
+                "images_count": len(full_data.get("images", [])) if full_data and full_data.get("images") else 0,
+            }
+        except Exception as e:
+            debug["fetch_tiktok_data"] = {"err": repr(e)}
 
         return web.json_response(debug)
 
