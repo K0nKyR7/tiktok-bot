@@ -177,9 +177,89 @@ def fetch_tiktok_via_curl_cffi(url: str) -> Optional[dict]:
     return None
 
 
+async def fetch_tiktok_via_ssstik(url: str) -> Optional[dict]:
+    """Скачивание TikTok через SSSTik API (обходит Cloudflare и блокировки датацентров Render)."""
+    try:
+        post_data = {
+            "id": url,
+            "locale": "en",
+            "tt": 0
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "HX-Request": "true",
+            "HX-Target": "target",
+            "HX-Current-URL": "https://ssstik.io/en",
+            "Origin": "https://ssstik.io",
+            "Referer": "https://ssstik.io/en",
+        }
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), headers=headers) as session:
+            async with session.post("https://ssstik.io/abc?url=dl", data=post_data) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    dl_urls = re.findall(r'href="([^"]+)"[^>]*class="[^"]*pure-button[^"]*"', html)
+                    valid_urls = [u for u in dl_urls if u.startswith("http")]
+
+                    photo_urls = re.findall(r'href="([^"]+)"[^>]*class="[^"]*(?:download_link|pure-button)[^"]*"[^>]*>(?:Download|Download photo|Photo)', html, re.IGNORECASE)
+                    if not photo_urls:
+                        photo_urls = [u for u in re.findall(r'<img[^>]+src="([^"]+)"', html) if "tikcdn" in u or "tiktok" in u]
+
+                    title_m = re.search(r'<h2>([^<]+)</h2>', html) or re.search(r'<p class="maintext">([^<]+)</p>', html)
+                    title = title_m.group(1).strip() if title_m else "TikTok video"
+
+                    video_url = None
+                    music_url = None
+                    for u in valid_urls:
+                        if "/m/" in u:
+                            music_url = u
+                        elif not video_url:
+                            video_url = u
+
+                    video_id = ""
+                    if video_url:
+                        id_m = re.search(r"/ssstik/(\d+)", video_url)
+                        if id_m:
+                            video_id = id_m.group(1)
+
+                    if not video_id:
+                        vid_m = re.search(r"/video/(\d+)", url) or re.search(r"(\d{15,22})", url)
+                        if vid_m:
+                            video_id = vid_m.group(1)
+
+                    if video_url or photo_urls:
+                        res = {
+                            "id": video_id,
+                            "title": title,
+                            "play": video_url,
+                            "hdplay": video_url,
+                            "music": music_url,
+                            "music_info": {
+                                "title": "Original Sound",
+                                "author": title,
+                                "play": music_url,
+                            }
+                        }
+                        if photo_urls and not video_url:
+                            res["images"] = photo_urls
+                        logger.info(f"SSSTik успешно скачал TikTok {url}: title={title[:30]}")
+                        return res
+    except Exception as e:
+        logger.warning(f"Ошибка SSSTik: {e}")
+    return None
+
+
 async def fetch_tiktok_data(url: str) -> Optional[dict]:
-    """Запрашивает данные видео через curl_cffi TikWM + официальный мобильный Aweme API + yt-dlp."""
-    # Способ 1: TikWM через curl_cffi (полная имитация TLS Chrome 120, гарантированный обход Cloudflare)
+    """Запрашивает данные видео через SSSTik + Aweme Mobile API + curl_cffi TikWM + yt-dlp."""
+    # Способ 1: SSSTik (работает напрямую с датацентров Render без блокировок Cloudflare)
+    try:
+        ssstik_data = await fetch_tiktok_via_ssstik(url)
+        if ssstik_data and (ssstik_data.get("play") or ssstik_data.get("images")):
+            return ssstik_data
+    except Exception as e:
+        logger.warning(f"Ошибка SSSTik: {e}")
+
+    # Способ 2: TikWM через curl_cffi (полная имитация TLS Chrome 120)
     try:
         cffi_data = await asyncio.to_thread(fetch_tiktok_via_curl_cffi, url)
         if cffi_data and (cffi_data.get("play") or cffi_data.get("images")):
@@ -1245,7 +1325,8 @@ async def handle_tiktok(message: types.Message):
             return
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://ssstik.io/",
         }
 
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), headers=headers) as session:
@@ -1306,7 +1387,8 @@ async def handle_instagram(message: types.Message):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Открыть в Instagram", url=ig_url)]])
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://ssstik.io/",
         }
 
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), headers=headers) as session:
@@ -1412,7 +1494,11 @@ async def callback_tiktok_audio(callback: CallbackQuery):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             raw_path = os.path.join(tmp_dir, "raw_audio")
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            audio_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://ssstik.io/",
+            }
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), headers=audio_headers) as session:
                 async with session.get(audio_url) as resp:
                     if resp.status == 200:
                         with open(raw_path, "wb") as f:
@@ -1475,7 +1561,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v33-cffi-inspect-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v34-ssstik-prod-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
