@@ -1411,7 +1411,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v23-test-proxied-tikwm | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v24-test-detail-proxied | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1429,25 +1429,7 @@ async def start_health_check_server():
         except Exception as e:
             debug["redirect_err"] = str(e)
 
-        # 1. Test Cobalt mirrors with redirected URL
-        cobalt_mirrors = [
-            "https://capi.3kh0.net/",
-            "https://cobalt-backend.canine.tools/",
-            "https://cobalt.api.scidsg.org/api/json",
-        ]
-        debug["cobalt"] = {}
-        target_tt_url = debug.get("redirect_url") or url
-        for cm in cobalt_mirrors:
-            try:
-                headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=6)) as s:
-                    async with s.post(cm, json={"url": target_tt_url}) as r:
-                        resp_text = await r.text()
-                        debug["cobalt"][cm] = {"status": r.status, "body": resp_text[:120]}
-            except Exception as e:
-                debug["cobalt"][cm] = {"err": str(e)}
-
-        # 2. Test Proxied TikWM via allorigins & codetabs
+        # 1. Test Proxied TikWM via allorigins & codetabs
         debug["proxied_tikwm"] = {}
         encoded_tt = urllib.parse.quote(url)
         raw_tikwm = f"https://www.tikwm.com/api/?url={encoded_tt}&hd=1"
@@ -1457,11 +1439,12 @@ async def start_health_check_server():
         }
         for pname, p_url in proxy_endpoints.items():
             try:
-                async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=8)) as s:
+                async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=5)) as s:
                     async with s.get(p_url) as r:
                         debug["proxied_tikwm"][pname] = {"status": r.status}
                         if r.status == 200:
-                            p_json = await r.json(content_type=None)
+                            raw = await r.read()
+                            p_json = json.loads(raw.decode("utf-8", errors="ignore"))
                             debug["proxied_tikwm"][pname]["code"] = p_json.get("code")
                             debug["proxied_tikwm"][pname]["msg"] = p_json.get("msg")
                             if p_json.get("data"):
@@ -1470,37 +1453,43 @@ async def start_health_check_server():
             except Exception as e:
                 debug["proxied_tikwm"][pname] = {"err": str(e)}
 
-        # 3. Test Aweme with full Android device query parameters
+        # 3. Test Aweme with detail and feed endpoints
         if video_id:
-            try:
-                ts = int(time.time())
-                aweme_url = (
-                    f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/"
-                    f"?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3"
-                    f"&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718"
-                    f"&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google"
-                    f"&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420"
-                    f"&os_version=13&os_api=33&carrier_region=US&sys_region=US&region=US"
-                    f"&app_name=musical_ly&app_language=en&language=en&timezone_name=America%2FNew_York"
-                    f"&timezone_offset=-14400&channel=googleplay&ac=wifi&mcc_mnc=310260&is_my_cn=0&aid=1233"
-                )
-                headers = {"User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)", "Accept-Encoding": "gzip"}
-                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=6)) as s:
-                    async with s.get(aweme_url) as r:
-                        debug["aweme_full_status"] = r.status
-                        if r.status == 200:
-                            raw = await r.read()
-                            if raw.startswith(b"\x1f\x8b"):
-                                raw = gzip.decompress(raw)
-                            a_data = json.loads(raw.decode("utf-8", errors="ignore"))
-                            aweme_list = a_data.get("aweme_list", [])
-                            debug["aweme_full_list_len"] = len(aweme_list)
-                            if aweme_list:
-                                debug["aweme_full_desc"] = aweme_list[0].get("desc")
-                                v_obj = aweme_list[0].get("video") or {}
-                                debug["aweme_full_play"] = bool(v_obj.get("play_addr", {}).get("url_list"))
-            except Exception as e:
-                debug["aweme_full_err"] = str(e)
+            ts = int(time.time())
+            endpoints = [
+                f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/aweme/detail/?aweme_id={video_id}&aid=1233",
+                f"https://api22-normal-c-alisg.tiktokv.com/aweme/v1/aweme/detail/?aweme_id={video_id}&aid=1233",
+                f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={video_id}&aid=1233",
+            ]
+            debug["aweme_tests"] = {}
+            for ep in endpoints:
+                try:
+                    headers = {
+                        "User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)",
+                        "Accept-Encoding": "gzip",
+                    }
+                    async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as s:
+                        async with s.get(ep) as r:
+                            debug["aweme_tests"][ep] = {"status": r.status}
+                            if r.status == 200:
+                                raw = await r.read()
+                                if raw.startswith(b"\x1f\x8b"):
+                                    raw = gzip.decompress(raw)
+                                a_data = json.loads(raw.decode("utf-8", errors="ignore"))
+                                debug["aweme_tests"][ep]["keys"] = list(a_data.keys())
+                                # Check aweme_detail
+                                d = a_data.get("aweme_detail")
+                                if d:
+                                    debug["aweme_tests"][ep]["detail_desc"] = d.get("desc")
+                                    debug["aweme_tests"][ep]["has_play"] = bool(d.get("video", {}).get("play_addr", {}).get("url_list"))
+                                # Check aweme_list
+                                l = a_data.get("aweme_list")
+                                if l:
+                                    debug["aweme_tests"][ep]["list_len"] = len(l)
+                                    debug["aweme_tests"][ep]["list_desc"] = l[0].get("desc")
+                                    debug["aweme_tests"][ep]["has_play"] = bool(l[0].get("video", {}).get("play_addr", {}).get("url_list"))
+                except Exception as e:
+                    debug["aweme_tests"][ep] = {"err": str(e)}
 
         return web.json_response(debug)
 
