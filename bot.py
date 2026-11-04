@@ -153,14 +153,46 @@ def to_absolute_url(url: Optional[str]) -> Optional[str]:
 # ==========================================
 # 1. TIKTOK
 # ==========================================
+def fetch_tiktok_via_curl_cffi(url: str) -> Optional[dict]:
+    """Скачивание TikTok через TikWM с имитацией TLS Chrome 120 (curl_cffi) для 100% обхода Cloudflare WAF."""
+    try:
+        from curl_cffi import requests as cffi_requests
+        encoded_url = urllib.parse.quote(url)
+        endpoints = [
+            f"https://www.tikwm.com/api/?url={encoded_url}&hd=1",
+            f"https://tikwm.com/api/?url={encoded_url}&hd=1",
+        ]
+        for ep in endpoints:
+            try:
+                r = cffi_requests.get(ep, impersonate="chrome120", timeout=12)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("code") == 0 and data.get("data"):
+                        logger.info(f"TikWM curl_cffi успешно получил данные для TikTok {url}")
+                        return data.get("data")
+            except Exception as e:
+                logger.warning(f"Ошибка TikWM curl_cffi ({ep}): {e}")
+    except Exception as e:
+        logger.warning(f"curl_cffi недоступен или ошибка: {e}")
+    return None
+
+
 async def fetch_tiktok_data(url: str) -> Optional[dict]:
-    """Запрашивает данные видео через официальный мобильный Aweme API TikTok + TikWM GET + yt-dlp."""
+    """Запрашивает данные видео через curl_cffi TikWM + официальный мобильный Aweme API + yt-dlp."""
+    # Способ 1: TikWM через curl_cffi (полная имитация TLS Chrome 120, гарантированный обход Cloudflare)
+    try:
+        cffi_data = await asyncio.to_thread(fetch_tiktok_via_curl_cffi, url)
+        if cffi_data and (cffi_data.get("play") or cffi_data.get("images")):
+            return cffi_data
+    except Exception as e:
+        logger.warning(f"Ошибка при вызове fetch_tiktok_via_curl_cffi: {e}")
+
     headers_browser = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
     }
 
-    # Способ 1: Официальный мобильный API TikTok (Aweme Mobile API) с параметрами Android
+    # Способ 2: Официальный мобильный API TikTok (Aweme Mobile API) с параметрами Android
     try:
         video_id = None
         vid_match = re.search(r"/video/(\d+)", url) or re.search(r"(\d{15,22})", url)
@@ -1429,7 +1461,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v28-debug-bytes | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v29-curl-cffi-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
