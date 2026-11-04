@@ -1298,36 +1298,69 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v18-tt-debug | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v19-tt-deep-debug | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
         debug = {"url": url}
-        # 1. Test TikWM
-        try:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
-                async with s.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1}) as r:
-                    debug["tikwm_status"] = r.status
-                    txt = await r.text()
-                    try:
-                        debug["tikwm_json"] = json.loads(txt)
-                    except Exception:
-                        debug["tikwm_raw"] = txt[:200]
-        except Exception as e:
-            debug["tikwm_err"] = str(e)
 
-        # 2. Test yt-dlp
+        # 1. TikWM with different User-Agents
+        uas = [
+            "okhttp/3.14.9",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+            "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7; Build/TQ3A.230901.001; Cronet/58.0.2991.0)"
+        ]
+        for ua in uas:
+            try:
+                headers = {"User-Agent": ua, "Accept": "*/*"}
+                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as s:
+                    async with s.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1}) as r:
+                        tag = ua.split("/")[0]
+                        debug[f"tikwm_{tag}"] = {"status": r.status}
+                        if r.status == 200:
+                            data = await r.json(content_type=None)
+                            debug[f"tikwm_{tag}"]["code"] = data.get("code")
+                            debug[f"tikwm_{tag}"]["msg"] = data.get("msg")
+            except Exception as e:
+                debug[f"tikwm_{ua[:10]}"] = {"err": str(e)}
+
+        # 2. Tikmate API
         try:
-            def ext():
-                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as y:
-                    return y.extract_info(url, download=False)
-            res = await asyncio.to_thread(ext)
-            debug["ytdlp_title"] = res.get("title")
-            debug["ytdlp_url"] = bool(res.get("url"))
-            debug["ytdlp_formats"] = len(res.get("formats", []))
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+                async with s.post("https://api.tikmate.app/api/lookup", data={"url": url}) as r:
+                    debug["tikmate"] = {"status": r.status}
+                    if r.status == 200:
+                        debug["tikmate"]["data"] = await r.json(content_type=None)
         except Exception as e:
-            debug["ytdlp_err"] = str(e)
+            debug["tikmate"] = {"err": str(e)}
+
+        # 3. Resolve redirect of vt.tiktok.com first
+        try:
+            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=5)) as s:
+                async with s.get(url, allow_redirects=True) as r:
+                    debug["redirect_url"] = str(r.url)
+                    vid = str(r.url).split("/video/")[1].split("?")[0] if "/video/" in str(r.url) else None
+                    debug["video_id"] = vid
+        except Exception as e:
+            debug["redirect_err"] = str(e)
+
+        # 4. Official TikTok aweme/v1/feed API using video_id
+        if debug.get("video_id"):
+            try:
+                aweme_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={debug['video_id']}"
+                headers = {"User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)"}
+                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as s:
+                    async with s.get(aweme_url) as r:
+                        debug["aweme_status"] = r.status
+                        if r.status == 200:
+                            a_data = await r.json(content_type=None)
+                            aw_list = a_data.get("aweme_list", [])
+                            debug["aweme_has_list"] = bool(aw_list)
+                            if aw_list:
+                                play_urls = aw_list[0].get("video", {}).get("play_addr", {}).get("url_list", [])
+                                debug["aweme_play_urls"] = len(play_urls)
+            except Exception as e:
+                debug["aweme_err"] = str(e)
 
         return web.json_response(debug)
 
