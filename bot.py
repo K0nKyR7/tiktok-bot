@@ -198,7 +198,13 @@ async def fetch_tiktok_via_ssstik(url: str) -> Optional[dict]:
             async with session.post("https://ssstik.io/abc?url=dl", data=post_data) as resp:
                 if resp.status == 200:
                     html = await resp.text()
-                    dl_urls = re.findall(r'href="([^"]+)"[^>]*class="[^"]*pure-button[^"]*"', html)
+                    # Extract video / audio links with multiple regex patterns for maximum robustness
+                    dl_urls = re.findall(r'href=[\x22\x27]([^\x22\x27]+)[\x22\x27][^>]*class=[\x22\x27][^\x22\x27]*pure-button', html)
+                    if not dl_urls:
+                        dl_urls = re.findall(r'class=[\x22\x27][^\x22\x27]*pure-button[^\x22\x27]*[\x22\x27][^>]*href=[\x22\x27]([^\x22\x27]+)[\x22\x27]', html)
+                    if not dl_urls:
+                        dl_urls = re.findall(r'https?://tikcdn\.io/[^\s\x22\x27<>]+', html)
+
                     valid_urls = [u for u in dl_urls if u.startswith("http")]
 
                     photo_urls = re.findall(r'href="([^"]+)"[^>]*class="[^"]*(?:download_link|pure-button)[^"]*"[^>]*>(?:Download|Download photo|Photo)', html, re.IGNORECASE)
@@ -213,7 +219,7 @@ async def fetch_tiktok_via_ssstik(url: str) -> Optional[dict]:
                     for u in valid_urls:
                         if "/m/" in u:
                             music_url = u
-                        elif not video_url:
+                        elif not video_url and ("/a/" not in u and "/p/" not in u):
                             video_url = u
 
                     video_id = ""
@@ -1561,7 +1567,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v35-debug-ssstik-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v36-ssstik-clean-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1623,45 +1629,6 @@ async def start_health_check_server():
                                 debug["aweme_inspect"]["matched_play_urls"] = len(v_obj.get("play_addr", {}).get("url_list", []))
             except Exception as e:
                 debug["aweme_inspect"]["err"] = repr(e)
-
-        # 1.4 Direct SSSTik test
-        debug["ssstik_test"] = {}
-        try:
-            post_data = {"id": url, "locale": "en", "tt": 0}
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "HX-Request": "true",
-                "HX-Target": "target",
-                "HX-Current-URL": "https://ssstik.io/en",
-                "Origin": "https://ssstik.io",
-                "Referer": "https://ssstik.io/en",
-            }
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), headers=headers) as s:
-                async with s.post("https://ssstik.io/abc?url=dl", data=post_data) as resp:
-                    debug["ssstik_test"]["status"] = resp.status
-                    txt = await resp.text()
-                    debug["ssstik_test"]["len"] = len(txt)
-                    debug["ssstik_test"]["preview"] = txt[:300]
-        except Exception as e:
-            debug["ssstik_test"]["err"] = repr(e)
-
-        # 1.5 Direct cffi test
-        debug["cffi_test"] = {}
-        try:
-            from curl_cffi import requests as cffi_req
-            debug["cffi_test"]["import_ok"] = True
-            encoded_url = urllib.parse.quote(url)
-            ep = f"https://www.tikwm.com/api/?url={encoded_url}&hd=1"
-            r = cffi_req.get(ep, impersonate="chrome120", timeout=10)
-            debug["cffi_test"]["status"] = r.status_code
-            debug["cffi_test"]["text_preview"] = r.text[:200]
-            if r.status_code == 200:
-                data = r.json()
-                debug["cffi_test"]["code"] = data.get("code")
-                debug["cffi_test"]["msg"] = data.get("msg")
-        except Exception as e:
-            debug["cffi_test"]["err"] = repr(e)
 
         # 2. Test full fetch_tiktok_data function
         try:
