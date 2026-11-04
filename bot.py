@@ -1298,7 +1298,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v19-tt-deep-debug | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v20-debug-all | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1354,11 +1354,16 @@ async def start_health_check_server():
                         debug["aweme_status"] = r.status
                         if r.status == 200:
                             a_data = await r.json(content_type=None)
-                            aw_list = a_data.get("aweme_list", [])
-                            debug["aweme_has_list"] = bool(aw_list)
-                            if aw_list:
-                                play_urls = aw_list[0].get("video", {}).get("play_addr", {}).get("url_list", [])
-                                debug["aweme_play_urls"] = len(play_urls)
+                            debug["aweme_keys"] = list(a_data.keys())
+                            if "aweme_list" in a_data:
+                                debug["aweme_list_len"] = len(a_data["aweme_list"])
+                                if a_data["aweme_list"]:
+                                    item = a_data["aweme_list"][0]
+                                    debug["item_keys"] = list(item.keys())
+                                    debug["desc"] = item.get("desc")
+                                    video_obj = item.get("video") or {}
+                                    play_addr = video_obj.get("play_addr") or {}
+                                    debug["play_urls"] = play_addr.get("url_list", [])[:2]
             except Exception as e:
                 debug["aweme_err"] = str(e)
 
@@ -1411,11 +1416,42 @@ async def start_health_check_server():
         url = request.query.get("url", "https://www.instagram.com/reels/DfI91GEqDeK/")
         m = INSTAGRAM_URL_REGEX.search(url)
         shortcode = m.group(1) if m else "DfI91GEqDeK"
+        debug = {"url": url, "shortcode": shortcode}
+
+        # Test ddinstagram
         try:
-            res = await fetch_instagram_media(url, shortcode)
-            return web.json_response({"status": "success" if res else "not_found", "data": res})
+            async with aiohttp.ClientSession(headers={"User-Agent": "TelegramBot"}) as s:
+                async with s.get(f"https://www.ddinstagram.com/reel/{shortcode}/") as r:
+                    debug["ddinstagram_status"] = r.status
+                    txt = await r.text()
+                    vm = re.search(r'<meta property=[\x22\x27]og:video(?::secure_url)?[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]', txt)
+                    debug["ddinstagram_video"] = vm.group(1) if vm else None
         except Exception as e:
-            return web.json_response({"status": "error", "message": str(e)}, status=500)
+            debug["ddinstagram_err"] = str(e)
+
+        # Test vxinstagram
+        try:
+            async with aiohttp.ClientSession(headers={"User-Agent": "TelegramBot"}) as s:
+                async with s.get(f"https://www.vxinstagram.com/reel/{shortcode}/") as r:
+                    debug["vxinstagram_status"] = r.status
+                    txt = await r.text()
+                    vm = re.search(r'<meta property=[\x22\x27]og:video(?::secure_url)?[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]', txt)
+                    debug["vxinstagram_video"] = vm.group(1) if vm else None
+        except Exception as e:
+            debug["vxinstagram_err"] = str(e)
+
+        # Test yt-dlp
+        try:
+            def ext_ig():
+                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as y:
+                    return y.extract_info(url, download=False)
+            res = await asyncio.to_thread(ext_ig)
+            debug["ytdlp_title"] = res.get("title")
+            debug["ytdlp_url"] = bool(res.get("url"))
+        except Exception as e:
+            debug["ytdlp_err"] = str(e)
+
+        return web.json_response(debug)
 
     async def handle_test_pin(request):
         url = request.query.get("url", "https://pin.it/5lleYI7Rp")
