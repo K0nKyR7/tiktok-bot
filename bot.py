@@ -1561,7 +1561,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v34-ssstik-prod-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v35-debug-ssstik-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1623,6 +1623,28 @@ async def start_health_check_server():
                                 debug["aweme_inspect"]["matched_play_urls"] = len(v_obj.get("play_addr", {}).get("url_list", []))
             except Exception as e:
                 debug["aweme_inspect"]["err"] = repr(e)
+
+        # 1.4 Direct SSSTik test
+        debug["ssstik_test"] = {}
+        try:
+            post_data = {"id": url, "locale": "en", "tt": 0}
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "HX-Request": "true",
+                "HX-Target": "target",
+                "HX-Current-URL": "https://ssstik.io/en",
+                "Origin": "https://ssstik.io",
+                "Referer": "https://ssstik.io/en",
+            }
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), headers=headers) as s:
+                async with s.post("https://ssstik.io/abc?url=dl", data=post_data) as resp:
+                    debug["ssstik_test"]["status"] = resp.status
+                    txt = await resp.text()
+                    debug["ssstik_test"]["len"] = len(txt)
+                    debug["ssstik_test"]["preview"] = txt[:300]
+        except Exception as e:
+            debug["ssstik_test"]["err"] = repr(e)
 
         # 1.5 Direct cffi test
         debug["cffi_test"] = {}
