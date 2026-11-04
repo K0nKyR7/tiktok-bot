@@ -1411,7 +1411,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v22-test-multitt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v23-test-proxied-tikwm | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1429,38 +1429,46 @@ async def start_health_check_server():
         except Exception as e:
             debug["redirect_err"] = str(e)
 
-        # 1. Test Cobalt mirrors for TikTok
+        # 1. Test Cobalt mirrors with redirected URL
         cobalt_mirrors = [
-            "https://taivideo.websites.com.vn/",
             "https://capi.3kh0.net/",
             "https://cobalt-backend.canine.tools/",
-            "https://api.qwk.app",
+            "https://cobalt.api.scidsg.org/api/json",
         ]
         debug["cobalt"] = {}
+        target_tt_url = debug.get("redirect_url") or url
         for cm in cobalt_mirrors:
             try:
                 headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
                 async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=6)) as s:
-                    async with s.post(cm, json={"url": url}) as r:
-                        debug["cobalt"][cm] = {"status": r.status}
-                        if r.status == 200:
-                            c_data = await r.json(content_type=None)
-                            debug["cobalt"][cm]["status_field"] = c_data.get("status")
-                            debug["cobalt"][cm]["url"] = bool(c_data.get("url"))
+                    async with s.post(cm, json={"url": target_tt_url}) as r:
+                        resp_text = await r.text()
+                        debug["cobalt"][cm] = {"status": r.status, "body": resp_text[:120]}
             except Exception as e:
                 debug["cobalt"][cm] = {"err": str(e)}
 
-        # 2. Test VKRdownloader
-        try:
-            vkr_url = f"https://api.vkrdownloader.com/server?vkr={url}"
-            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=6)) as s:
-                async with s.get(vkr_url) as r:
-                    debug["vkr_status"] = r.status
-                    if r.status == 200:
-                        v_data = await r.json(content_type=None)
-                        debug["vkr_downloads"] = len(v_data.get("data", {}).get("downloads", []))
-        except Exception as e:
-            debug["vkr_err"] = str(e)
+        # 2. Test Proxied TikWM via allorigins & codetabs
+        debug["proxied_tikwm"] = {}
+        encoded_tt = urllib.parse.quote(url)
+        raw_tikwm = f"https://www.tikwm.com/api/?url={encoded_tt}&hd=1"
+        proxy_endpoints = {
+            "allorigins": f"https://api.allorigins.win/raw?url={urllib.parse.quote(raw_tikwm)}",
+            "codetabs": f"https://api.codetabs.com/v1/proxy?quest={urllib.parse.quote(raw_tikwm)}"
+        }
+        for pname, p_url in proxy_endpoints.items():
+            try:
+                async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=8)) as s:
+                    async with s.get(p_url) as r:
+                        debug["proxied_tikwm"][pname] = {"status": r.status}
+                        if r.status == 200:
+                            p_json = await r.json(content_type=None)
+                            debug["proxied_tikwm"][pname]["code"] = p_json.get("code")
+                            debug["proxied_tikwm"][pname]["msg"] = p_json.get("msg")
+                            if p_json.get("data"):
+                                debug["proxied_tikwm"][pname]["has_play"] = bool(p_json["data"].get("play"))
+                                debug["proxied_tikwm"][pname]["title"] = p_json["data"].get("title")
+            except Exception as e:
+                debug["proxied_tikwm"][pname] = {"err": str(e)}
 
         # 3. Test Aweme with full Android device query parameters
         if video_id:
