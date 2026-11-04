@@ -1429,7 +1429,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v27-inspect-aweme | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v28-debug-bytes | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1468,11 +1468,17 @@ async def start_health_check_server():
                 async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
                     async with s.get(aweme_url) as r:
                         debug["aweme_inspect"]["status"] = r.status
+                        debug["aweme_inspect"]["encoding"] = r.headers.get("Content-Encoding")
+                        debug["aweme_inspect"]["content_type"] = r.headers.get("Content-Type")
                         if r.status == 200:
                             raw = await r.read()
+                            debug["aweme_inspect"]["raw_len"] = len(raw)
+                            debug["aweme_inspect"]["raw_head"] = repr(raw[:30])
+                            decomp = raw
                             if raw.startswith(b"\x1f\x8b"):
-                                raw = gzip.decompress(raw)
-                            feed_json = json.loads(raw.decode("utf-8", errors="ignore"))
+                                decomp = gzip.decompress(raw)
+                            debug["aweme_inspect"]["decomp_head"] = repr(decomp[:50])
+                            feed_json = json.loads(decomp.decode("utf-8", errors="ignore"))
                             items = feed_json.get("aweme_list", [])
                             debug["aweme_inspect"]["items_count"] = len(items)
                             debug["aweme_inspect"]["item_ids"] = [str(it.get("aweme_id")) for it in items]
