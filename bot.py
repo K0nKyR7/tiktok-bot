@@ -1429,7 +1429,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v26-tiktok-aweme-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v27-inspect-aweme | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1447,29 +1447,44 @@ async def start_health_check_server():
         except Exception as e:
             debug["redirect_err"] = str(e)
 
-        # 1. Test Proxied TikWM via allorigins & codetabs
-        debug["proxied_tikwm"] = {}
-        encoded_tt = urllib.parse.quote(url)
-        raw_tikwm = f"https://www.tikwm.com/api/?url={encoded_tt}&hd=1"
-        proxy_endpoints = {
-            "allorigins": f"https://api.allorigins.win/raw?url={urllib.parse.quote(raw_tikwm)}",
-            "codetabs": f"https://api.codetabs.com/v1/proxy?quest={urllib.parse.quote(raw_tikwm)}"
-        }
-        for pname, p_url in proxy_endpoints.items():
+        # 1. Direct Aweme test with full inspect
+        debug["aweme_inspect"] = {}
+        if video_id:
+            ts = int(time.time())
+            aweme_url = (
+                f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/"
+                f"?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3"
+                f"&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718"
+                f"&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google"
+                f"&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420"
+                f"&os_version=13&os_api=33&carrier_region=US&sys_region=US&region=US"
+                f"&app_name=musical_ly&app_language=en&language=en&channel=googleplay&ac=wifi&aid=1233"
+            )
+            headers = {
+                "User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)",
+                "Accept-Encoding": "gzip",
+            }
             try:
-                async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=5)) as s:
-                    async with s.get(p_url) as r:
-                        debug["proxied_tikwm"][pname] = {"status": r.status}
+                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
+                    async with s.get(aweme_url) as r:
+                        debug["aweme_inspect"]["status"] = r.status
                         if r.status == 200:
                             raw = await r.read()
-                            p_json = json.loads(raw.decode("utf-8", errors="ignore"))
-                            debug["proxied_tikwm"][pname]["code"] = p_json.get("code")
-                            debug["proxied_tikwm"][pname]["msg"] = p_json.get("msg")
-                            if p_json.get("data"):
-                                debug["proxied_tikwm"][pname]["has_play"] = bool(p_json["data"].get("play"))
-                                debug["proxied_tikwm"][pname]["title"] = p_json["data"].get("title")
+                            if raw.startswith(b"\x1f\x8b"):
+                                raw = gzip.decompress(raw)
+                            feed_json = json.loads(raw.decode("utf-8", errors="ignore"))
+                            items = feed_json.get("aweme_list", [])
+                            debug["aweme_inspect"]["items_count"] = len(items)
+                            debug["aweme_inspect"]["item_ids"] = [str(it.get("aweme_id")) for it in items]
+                            # Find matching
+                            matched = [it for it in items if str(it.get("aweme_id")) == str(video_id)]
+                            debug["aweme_inspect"]["found_target"] = bool(matched)
+                            if matched:
+                                v_obj = matched[0].get("video") or {}
+                                debug["aweme_inspect"]["matched_desc"] = matched[0].get("desc")
+                                debug["aweme_inspect"]["matched_play_urls"] = len(v_obj.get("play_addr", {}).get("url_list", []))
             except Exception as e:
-                debug["proxied_tikwm"][pname] = {"err": str(e)}
+                debug["aweme_inspect"]["err"] = repr(e)
 
         # 2. Test full fetch_tiktok_data function
         try:
