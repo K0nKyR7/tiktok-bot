@@ -1567,7 +1567,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v36-ssstik-clean-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v37-resilient-polling-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1913,14 +1913,29 @@ async def start_health_check_server():
     logger.info(f"Веб-сервер запущен на порту {port}")
 
 
+async def run_bot_polling():
+    """Неубиваемый цикл поллинга с автоматическим перезапуском при сбоях сети, перезагрузках или конфликтах Telegram."""
+    while True:
+        try:
+            logger.info("Запуск Telegram polling...")
+            await bot.delete_webhook(drop_pending_updates=False)
+            await dp.start_polling(bot, handle_signals=False)
+            logger.warning("dp.start_polling завершился штатно, перезапуск через 3 сек...")
+        except Exception as e:
+            logger.error(f"Ошибка в Telegram polling: {e}, перезапуск через 5 сек...", exc_info=True)
+            await asyncio.sleep(5)
+        else:
+            await asyncio.sleep(3)
+
+
 async def main():
-    logger.info("Запуск бота...")
-    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Запуск сервиса...")
+    await bot.delete_webhook(drop_pending_updates=False)
 
     if os.getenv("PORT"):
         await start_health_check_server()
 
-    await dp.start_polling(bot)
+    await run_bot_polling()
 
 
 if __name__ == "__main__":
