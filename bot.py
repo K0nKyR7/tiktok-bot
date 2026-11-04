@@ -1411,7 +1411,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v24-test-detail-proxied | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v25-test-regions | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1453,43 +1453,42 @@ async def start_health_check_server():
             except Exception as e:
                 debug["proxied_tikwm"][pname] = {"err": str(e)}
 
-        # 3. Test Aweme with detail and feed endpoints
+        # 2. Test Aweme with different regions (US, BY, KZ, DE)
         if video_id:
             ts = int(time.time())
-            endpoints = [
-                f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/aweme/detail/?aweme_id={video_id}&aid=1233",
-                f"https://api22-normal-c-alisg.tiktokv.com/aweme/v1/aweme/detail/?aweme_id={video_id}&aid=1233",
-                f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={video_id}&aid=1233",
-            ]
-            debug["aweme_tests"] = {}
-            for ep in endpoints:
+            regions = ["US", "BY", "KZ", "DE"]
+            debug["aweme_regions"] = {}
+            for reg in regions:
                 try:
+                    aweme_url = (
+                        f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/"
+                        f"?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3"
+                        f"&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718"
+                        f"&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google"
+                        f"&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420"
+                        f"&os_version=13&os_api=33&carrier_region={reg}&sys_region={reg}&region={reg}"
+                        f"&app_name=musical_ly&app_language=en&language=en&channel=googleplay&ac=wifi&aid=1233"
+                    )
                     headers = {
                         "User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)",
                         "Accept-Encoding": "gzip",
                     }
                     async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as s:
-                        async with s.get(ep) as r:
-                            debug["aweme_tests"][ep] = {"status": r.status}
+                        async with s.get(aweme_url) as r:
+                            debug["aweme_regions"][reg] = {"status": r.status}
                             if r.status == 200:
                                 raw = await r.read()
                                 if raw.startswith(b"\x1f\x8b"):
                                     raw = gzip.decompress(raw)
                                 a_data = json.loads(raw.decode("utf-8", errors="ignore"))
-                                debug["aweme_tests"][ep]["keys"] = list(a_data.keys())
-                                # Check aweme_detail
-                                d = a_data.get("aweme_detail")
-                                if d:
-                                    debug["aweme_tests"][ep]["detail_desc"] = d.get("desc")
-                                    debug["aweme_tests"][ep]["has_play"] = bool(d.get("video", {}).get("play_addr", {}).get("url_list"))
-                                # Check aweme_list
-                                l = a_data.get("aweme_list")
-                                if l:
-                                    debug["aweme_tests"][ep]["list_len"] = len(l)
-                                    debug["aweme_tests"][ep]["list_desc"] = l[0].get("desc")
-                                    debug["aweme_tests"][ep]["has_play"] = bool(l[0].get("video", {}).get("play_addr", {}).get("url_list"))
+                                aweme_list = a_data.get("aweme_list", [])
+                                debug["aweme_regions"][reg]["list_len"] = len(aweme_list)
+                                if aweme_list:
+                                    debug["aweme_regions"][reg]["desc"] = aweme_list[0].get("desc")
+                                    v_obj = aweme_list[0].get("video") or {}
+                                    debug["aweme_regions"][reg]["has_play"] = bool(v_obj.get("play_addr", {}).get("url_list"))
                 except Exception as e:
-                    debug["aweme_tests"][ep] = {"err": str(e)}
+                    debug["aweme_regions"][reg] = {"err": repr(e)}
 
         return web.json_response(debug)
 
