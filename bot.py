@@ -239,7 +239,7 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
                                             target_item = it
                                             break
                                     if not target_item:
-                                        target_item = aweme_list[0]
+                                        continue
 
                                     desc = target_item.get("desc") or "TikTok video"
 
@@ -1475,7 +1475,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v31-cffi-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v32-inspect-cffi-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1537,6 +1537,17 @@ async def start_health_check_server():
                                 debug["aweme_inspect"]["matched_play_urls"] = len(v_obj.get("play_addr", {}).get("url_list", []))
             except Exception as e:
                 debug["aweme_inspect"]["err"] = repr(e)
+
+        # 1.5 Direct cffi test
+        try:
+            cffi_res = await asyncio.to_thread(fetch_tiktok_via_curl_cffi, url)
+            debug["cffi_test"] = {
+                "success": bool(cffi_res and (cffi_res.get("play") or cffi_res.get("images"))),
+                "title": cffi_res.get("title") if cffi_res else None,
+                "has_play": bool(cffi_res.get("play")) if cffi_res else False,
+            }
+        except Exception as e:
+            debug["cffi_test"] = {"err": repr(e)}
 
         # 2. Test full fetch_tiktok_data function
         try:
