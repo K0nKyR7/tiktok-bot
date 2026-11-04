@@ -153,24 +153,65 @@ def to_absolute_url(url: Optional[str]) -> Optional[str]:
 # 1. TIKTOK
 # ==========================================
 async def fetch_tiktok_data(url: str) -> Optional[dict]:
-    """Запрашивает данные видео через TikWM API."""
-    api_url = "https://www.tikwm.com/api/"
+    """Запрашивает данные видео через TikWM API (с ретраем при лимитах) + резерв yt-dlp."""
     params = {"url": url, "count": 12, "cursor": 0, "web": 1, "hd": 1}
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), headers=headers) as session:
-        try:
-            async with session.post(api_url, data=params) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("code") == 0:
-                        return data.get("data")
-                    else:
-                        logger.warning(f"TikWM вернул сообщение: {data.get('msg')}")
-        except Exception as e:
-            logger.error(f"Ошибка запроса к TikWM API: {e}")
+    hosts = ["https://www.tikwm.com/api/", "https://tikwm.com/api/"]
+    for host in hosts:
+        for attempt in range(2):
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers=headers) as session:
+                    async with session.post(host, data=params) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            if data.get("code") == 0 and data.get("data"):
+                                return data.get("data")
+                            msg = data.get("msg") or ""
+                            logger.warning(f"TikWM ({host}) попытка {attempt+1}: {msg}")
+                            if "Free Api Limit" in msg or "1 request/second" in msg:
+                                await asyncio.sleep(1.2)
+                                continue
+            except Exception as e:
+                logger.warning(f"Ошибка TikWM ({host}): {e}")
+                await asyncio.sleep(1)
+
+    # Резерв: yt-dlp
+    logger.info("Пробуем резервное получение TikTok через yt-dlp...")
+    try:
+        def extract_tt():
+            opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        info = await asyncio.to_thread(extract_tt)
+        if info:
+            v_url = info.get("url")
+            if not v_url and info.get("formats"):
+                v_url = info["formats"][-1].get("url")
+            if v_url:
+                return {
+                    "id": info.get("id", ""),
+                    "title": info.get("title") or "TikTok video",
+                    "play": v_url,
+                    "music": v_url,
+                    "music_info": {
+                        "title": info.get("track") or info.get("title") or "Audio",
+                        "author": info.get("artist") or info.get("uploader") or "TikTok"
+                    }
+                }
+    except Exception as e:
+        err_str = str(e)
+        logger.warning(f"Ошибка резервного yt-dlp для TikTok: {err_str}")
+        if "comfortable for some audiences" in err_str or "Log in for access" in err_str:
+            return {"error": "age_restricted"}
+
     return None
 
 
@@ -810,41 +851,43 @@ def download_pinterest_media(url: str, output_dir: str) -> dict:
 async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
     """Скачивание Instagram Reels / публикаций через надежные мульти-провайдеры."""
 
-    # Способ 1: vxinstagram (проверенный генератор OpenGraph прямых ссылок)
-    vx_endpoints = [
+    # Способ 1: ddinstagram / vxinstagram (OpenGraph провайдеры)
+    embed_endpoints = [
+        f"https://www.ddinstagram.com/reel/{shortcode}/",
+        f"https://ddinstagram.com/reel/{shortcode}/",
         f"https://www.vxinstagram.com/reel/{shortcode}/",
+        f"https://www.ddinstagram.com/p/{shortcode}/",
         f"https://www.vxinstagram.com/p/{shortcode}/",
     ]
-    for vx_url in vx_endpoints:
+    for ep in embed_endpoints:
         try:
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=12),
+                timeout=aiohttp.ClientTimeout(total=8),
                 headers={"User-Agent": "TelegramBot"}
             ) as session:
-                async with session.get(vx_url) as r:
+                async with session.get(ep) as r:
                     if r.status == 200:
                         html = await r.text()
-                        # Ищем прямой URL видео в og:video или og:video:secure_url
                         vm = re.search(
                             r'<meta property=[\x22\x27]og:video(?::secure_url)?[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]',
                             html
                         )
-                        if vm and vm.group(1).endswith(".mp4"):
-                            logger.info(f"Instagram найден через vxinstagram: {vm.group(1)}")
+                        if vm and ".mp4" in vm.group(1):
+                            logger.info(f"Instagram найден через {ep}: {vm.group(1)}")
                             return {"type": "video", "url": vm.group(1)}
 
-                        # Если это публикация с фото
                         im = re.search(
                             r'<meta property=[\x22\x27]og:image[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]',
                             html
                         )
                         if im and not im.group(1).endswith(".mp4"):
-                            logger.info(f"Instagram фото найдено через vxinstagram: {im.group(1)}")
+                            logger.info(f"Instagram фото найдено через {ep}: {im.group(1)}")
                             return {"type": "image", "url": im.group(1)}
         except Exception as e:
-            logger.warning(f"Ошибка vxinstagram ({vx_url}): {e}")
+            logger.debug(f"Ошибка {ep}: {e}")
 
     # Способ 2: yt-dlp Instagram экстрактор
+    last_ig_error = ""
     def extract_ig_ytdlp():
         opts = {
             "quiet": True,
@@ -869,13 +912,14 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
             logger.info("Instagram найден через yt-dlp")
             return res
     except Exception as e:
+        last_ig_error = str(e)
         logger.warning(f"Ошибка yt-dlp instagram: {e}")
 
     # Способ 3: vkrdownloader API
     try:
         api_url = f"https://api.vkrdownloader.com/server?vkr={url}"
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10),
+            timeout=aiohttp.ClientTimeout(total=8),
             headers={"User-Agent": "Mozilla/5.0"}
         ) as session:
             async with session.get(api_url) as r:
@@ -886,7 +930,10 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
                         if d.get("url"):
                             return {"type": "video", "url": d.get("url")}
     except Exception as e:
-        logger.warning(f"Ошибка vkr: {e}")
+        logger.debug(f"Ошибка vkr: {e}")
+
+    if "available to everyone" in last_ig_error or "certain audiences" in last_ig_error or "login" in last_ig_error.lower():
+        return {"error": "age_restricted"}
 
     return None
 
@@ -977,6 +1024,14 @@ async def handle_tiktok(message: types.Message):
         await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
         data = await fetch_tiktok_data(tiktok_url)
 
+        if isinstance(data, dict) and data.get("error") == "age_restricted":
+            await status_msg.edit_text(
+                "🔞 **Это видео в TikTok имеет возрастное ограничение (18+)** или скрыто автором.\n\n"
+                "TikTok требует подтверждения возраста в приложении для его просмотра.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
         if not data:
             await status_msg.edit_text("❌ Не удалось найти видео TikTok. Возможно, оно приватное или удалено.")
             return
@@ -1056,6 +1111,14 @@ async def handle_instagram(message: types.Message):
     try:
         await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_VIDEO)
         media = await fetch_instagram_media(ig_url, shortcode)
+
+        if isinstance(media, dict) and media.get("error") == "age_restricted":
+            await status_msg.edit_text(
+                "🔞 **Это видео в Instagram имеет возрастное ограничение (18+)** или доступно только авторизованным пользователям.\n\n"
+                "Instagram блокирует анонимное скачивание такого контента.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
 
         if not media or not media.get("url"):
             await status_msg.edit_text("❌ Не удалось найти видео. Возможно, профиль приватный или публикация удалена.")
@@ -1235,7 +1298,20 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v16-clean-no-yt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v17-tt-resilient | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+
+    async def handle_test_tt(request):
+        url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
+        try:
+            data = await fetch_tiktok_data(url)
+            return web.json_response({
+                "status": "success" if data else "failed",
+                "title": data.get("title") if data else None,
+                "play": data.get("play") if data else None,
+                "error": data.get("error") if data else None
+            })
+        except Exception as e:
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
 
     async def handle_test_yt_audio(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
@@ -1462,6 +1538,7 @@ async def start_health_check_server():
     app.router.add_get("/health", handle_ping)
     app.router.add_get("/test-yt", handle_test_yt)
     app.router.add_get("/test-yt-audio", handle_test_yt_audio)
+    app.router.add_get("/test-tt", handle_test_tt)
     app.router.add_get("/test-ig", handle_test_ig)
     app.router.add_get("/test-pin", handle_test_pin)
     app.router.add_get("/test-apis", handle_test_apis)
