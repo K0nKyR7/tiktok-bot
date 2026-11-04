@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 import json
@@ -1567,7 +1568,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v37-resilient-polling-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v38-subprocess-fixed-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
