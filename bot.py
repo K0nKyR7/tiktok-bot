@@ -153,46 +153,14 @@ def to_absolute_url(url: Optional[str]) -> Optional[str]:
 # ==========================================
 # 1. TIKTOK
 # ==========================================
-def fetch_tiktok_via_curl_cffi(url: str) -> Optional[dict]:
-    """Скачивание TikTok через TikWM с имитацией TLS Chrome 120 (curl_cffi) для 100% обхода Cloudflare WAF."""
-    try:
-        from curl_cffi import requests as cffi_requests
-        encoded_url = urllib.parse.quote(url)
-        endpoints = [
-            f"https://www.tikwm.com/api/?url={encoded_url}&hd=1",
-            f"https://tikwm.com/api/?url={encoded_url}&hd=1",
-        ]
-        for ep in endpoints:
-            try:
-                r = cffi_requests.get(ep, impersonate="chrome120", timeout=12)
-                if r.status_code == 200:
-                    data = r.json()
-                    if data.get("code") == 0 and data.get("data"):
-                        logger.info(f"TikWM curl_cffi успешно получил данные для TikTok {url}")
-                        return data.get("data")
-            except Exception as e:
-                logger.warning(f"Ошибка TikWM curl_cffi ({ep}): {e}")
-    except Exception as e:
-        logger.warning(f"curl_cffi недоступен или ошибка: {e}")
-    return None
-
-
 async def fetch_tiktok_data(url: str) -> Optional[dict]:
-    """Запрашивает данные видео через curl_cffi TikWM + официальный мобильный Aweme API + yt-dlp."""
-    # Способ 1: TikWM через curl_cffi (полная имитация TLS Chrome 120, гарантированный обход Cloudflare)
-    try:
-        cffi_data = await asyncio.to_thread(fetch_tiktok_via_curl_cffi, url)
-        if cffi_data and (cffi_data.get("play") or cffi_data.get("images")):
-            return cffi_data
-    except Exception as e:
-        logger.warning(f"Ошибка при вызове fetch_tiktok_via_curl_cffi: {e}")
-
+    """Запрашивает данные видео через официальный мобильный Aweme API TikTok + TikWM GET + yt-dlp."""
     headers_browser = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
     }
 
-    # Способ 2: Официальный мобильный API TikTok (Aweme Mobile API) с параметрами Android
+    # Способ 1: Официальный мобильный API TikTok (Aweme Mobile API) с параметрами Android
     try:
         video_id = None
         vid_match = re.search(r"/video/(\d+)", url) or re.search(r"(\d{15,22})", url)
@@ -210,76 +178,93 @@ async def fetch_tiktok_data(url: str) -> Optional[dict]:
         if video_id:
             logger.info(f"Пробуем официальный TikTok Aweme Mobile API для video_id={video_id}...")
             ts = int(time.time())
-            aweme_url = (
-                f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/"
-                f"?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3"
-                f"&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718"
-                f"&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google"
-                f"&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420"
-                f"&os_version=13&os_api=33&carrier_region=US&sys_region=US&region=US"
-                f"&app_name=musical_ly&app_language=en&language=en&channel=googleplay&ac=wifi&aid=1233"
-            )
+            aweme_urls = [
+                # US/Global
+                f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420&os_version=13&os_api=33&carrier_region=US&sys_region=US&region=US&app_name=musical_ly&app_language=en&language=en&channel=googleplay&ac=wifi&aid=1233",
+                # Asia / CIS / International
+                f"https://api22-normal-c-alisg.tiktokv.com/aweme/v1/feed/?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420&os_version=13&os_api=33&carrier_region=SG&sys_region=SG&region=SG&app_name=musical_ly&app_language=en&language=en&channel=googleplay&ac=wifi&aid=1233",
+            ]
             aweme_headers = {
                 "User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)",
                 "Accept-Encoding": "gzip",
             }
-            async with aiohttp.ClientSession(headers=aweme_headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
-                async with s.get(aweme_url) as r:
-                    if r.status == 200:
-                        raw = await r.read()
-                        if raw.startswith(b"\x1f\x8b"):
-                            raw = gzip.decompress(raw)
-                        feed_json = json.loads(raw.decode("utf-8", errors="ignore"))
-                        aweme_list = feed_json.get("aweme_list", [])
-                        if aweme_list:
-                            # Ищем точное совпадение по ID или берем первое
-                            target_item = None
-                            for it in aweme_list:
-                                if str(it.get("aweme_id")) == str(video_id):
-                                    target_item = it
-                                    break
-                            if not target_item:
-                                target_item = aweme_list[0]
+            for a_url in aweme_urls:
+                try:
+                    async with aiohttp.ClientSession(headers=aweme_headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
+                        async with s.get(a_url) as r:
+                            if r.status == 200:
+                                raw = await r.read()
+                                if raw.startswith(b"\x1f\x8b"):
+                                    raw = gzip.decompress(raw)
+                                if not raw or not raw.strip():
+                                    continue
+                                feed_json = json.loads(raw.decode("utf-8", errors="ignore"))
+                                aweme_list = feed_json.get("aweme_list", [])
+                                if aweme_list:
+                                    target_item = None
+                                    for it in aweme_list:
+                                        if str(it.get("aweme_id")) == str(video_id):
+                                            target_item = it
+                                            break
+                                    if not target_item:
+                                        target_item = aweme_list[0]
 
-                            desc = target_item.get("desc") or "TikTok video"
+                                    desc = target_item.get("desc") or "TikTok video"
 
-                            # Проверка фото-карусели
-                            images = []
-                            img_post = target_item.get("image_post_info")
-                            if img_post and img_post.get("images"):
-                                for img_obj in img_post.get("images", []):
-                                    d_img = img_obj.get("display_image", {})
-                                    u_list = d_img.get("url_list", [])
-                                    if u_list:
-                                        images.append(u_list[0])
+                                    # Фото-карусель
+                                    images = []
+                                    img_post = target_item.get("image_post_info")
+                                    if img_post and img_post.get("images"):
+                                        for img_obj in img_post.get("images", []):
+                                            d_img = img_obj.get("display_image", {})
+                                            u_list = d_img.get("url_list", [])
+                                            if u_list:
+                                                images.append(u_list[0])
 
-                            v_urls = target_item.get("video", {}).get("play_addr", {}).get("url_list", [])
-                            m_obj = target_item.get("music") or {}
-                            m_play_info = m_obj.get("play_url") or {}
-                            m_url = m_play_info.get("uri")
-                            if not m_url and m_play_info.get("url_list"):
-                                m_url = m_play_info["url_list"][0]
+                                    # Видео-ссылки (проверяем play_addr, download_addr, bit_rate)
+                                    v_urls = []
+                                    v_obj = target_item.get("video") or {}
+                                    if v_obj.get("play_addr", {}).get("url_list"):
+                                        v_urls.extend(v_obj["play_addr"]["url_list"])
+                                    if v_obj.get("download_addr", {}).get("url_list"):
+                                        v_urls.extend(v_obj["download_addr"]["url_list"])
+                                    if v_obj.get("bit_rate"):
+                                        for br in v_obj["bit_rate"]:
+                                            br_urls = br.get("play_addr", {}).get("url_list", [])
+                                            if br_urls:
+                                                v_urls.extend(br_urls)
 
-                            result = {
-                                "id": video_id,
-                                "title": desc,
-                                "play": v_urls[0] if v_urls else None,
-                                "hdplay": v_urls[-1] if len(v_urls) > 1 else (v_urls[0] if v_urls else None),
-                                "music": m_url or (v_urls[0] if v_urls else None),
-                                "music_info": {
-                                    "title": m_obj.get("title") or "Original Sound",
-                                    "author": m_obj.get("author") or target_item.get("author", {}).get("nickname") or "",
-                                    "play": m_url,
-                                },
-                                "author": {
-                                    "nickname": target_item.get("author", {}).get("nickname") or "",
-                                    "unique_id": target_item.get("author", {}).get("unique_id") or "",
-                                }
-                            }
-                            if images:
-                                result["images"] = images
-                            logger.info(f"TikTok Aweme Mobile API успешно извлек данные для video_id={video_id}")
-                            return result
+                                    m_obj = target_item.get("music") or {}
+                                    m_play_info = m_obj.get("play_url") or {}
+                                    m_url = m_play_info.get("uri")
+                                    if not m_url and m_play_info.get("url_list"):
+                                        m_url = m_play_info["url_list"][0]
+                                    if not m_url and v_urls:
+                                        m_url = v_urls[0]
+
+                                    result = {
+                                        "id": video_id,
+                                        "title": desc,
+                                        "play": v_urls[0] if v_urls else None,
+                                        "hdplay": v_urls[-1] if len(v_urls) > 1 else (v_urls[0] if v_urls else None),
+                                        "music": m_url,
+                                        "music_info": {
+                                            "title": m_obj.get("title") or "Original Sound",
+                                            "author": m_obj.get("author") or target_item.get("author", {}).get("nickname") or "",
+                                            "play": m_url,
+                                        },
+                                        "author": {
+                                            "nickname": target_item.get("author", {}).get("nickname") or "",
+                                            "unique_id": target_item.get("author", {}).get("unique_id") or "",
+                                        }
+                                    }
+                                    if images:
+                                        result["images"] = images
+                                    if result.get("play") or result.get("images"):
+                                        logger.info(f"TikTok Aweme Mobile API успешно извлек данные для video_id={video_id}")
+                                        return result
+                except Exception as ex:
+                    logger.debug(f"Ошибка Aweme {a_url}: {ex}")
     except Exception as e:
         logger.warning(f"Ошибка Aweme Mobile API: {e}")
 
@@ -1461,7 +1446,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v29-curl-cffi-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v30-multi-aweme-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
