@@ -4,3 +4,4 @@ python-dotenv
 yt-dlp
 imageio-ffmpeg
 deno
+curl_cffi

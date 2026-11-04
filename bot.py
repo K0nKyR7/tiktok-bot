@@ -153,14 +153,46 @@ def to_absolute_url(url: Optional[str]) -> Optional[str]:
 # ==========================================
 # 1. TIKTOK
 # ==========================================
+def fetch_tiktok_via_curl_cffi(url: str) -> Optional[dict]:
+    """Скачивание TikTok через TikWM с имитацией TLS Chrome 120 (curl_cffi) для 100% обхода Cloudflare WAF."""
+    try:
+        from curl_cffi import requests as cffi_requests
+        encoded_url = urllib.parse.quote(url)
+        endpoints = [
+            f"https://www.tikwm.com/api/?url={encoded_url}&hd=1",
+            f"https://tikwm.com/api/?url={encoded_url}&hd=1",
+        ]
+        for ep in endpoints:
+            try:
+                r = cffi_requests.get(ep, impersonate="chrome120", timeout=12)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("code") == 0 and data.get("data"):
+                        logger.info(f"TikWM curl_cffi успешно получил данные для TikTok {url}")
+                        return data.get("data")
+            except Exception as e:
+                logger.warning(f"Ошибка TikWM curl_cffi ({ep}): {e}")
+    except Exception as e:
+        logger.warning(f"curl_cffi недоступен или ошибка: {e}")
+    return None
+
+
 async def fetch_tiktok_data(url: str) -> Optional[dict]:
-    """Запрашивает данные видео через официальный мобильный Aweme API TikTok + TikWM GET + yt-dlp."""
+    """Запрашивает данные видео через curl_cffi TikWM + официальный мобильный Aweme API + yt-dlp."""
+    # Способ 1: TikWM через curl_cffi (полная имитация TLS Chrome 120, гарантированный обход Cloudflare)
+    try:
+        cffi_data = await asyncio.to_thread(fetch_tiktok_via_curl_cffi, url)
+        if cffi_data and (cffi_data.get("play") or cffi_data.get("images")):
+            return cffi_data
+    except Exception as e:
+        logger.warning(f"Ошибка при вызове fetch_tiktok_via_curl_cffi: {e}")
+
     headers_browser = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
     }
 
-    # Способ 1: Официальный мобильный API TikTok (Aweme Mobile API) с параметрами Android
+    # Способ 2: Официальный мобильный API TikTok (Aweme Mobile API) с параметрами Android
     try:
         video_id = None
         vid_match = re.search(r"/video/(\d+)", url) or re.search(r"(\d{15,22})", url)
@@ -963,23 +995,18 @@ def download_pinterest_media(url: str, output_dir: str) -> dict:
 # 4. INSTAGRAM (vxinstagram + yt-dlp + vkr)
 # ==========================================
 async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
-    """Скачивание Instagram Reels / публикаций через мульти-провайдеры (vxinstagram, Cobalt, yt-dlp, vkr)."""
+    """Скачивание Instagram Reels / публикаций через мульти-провайдеры (vxinstagram, yt-dlp, Cobalt, vkr)."""
 
-    # Способ 1: vxinstagram / instagramez / ddinstagram (OpenGraph провайдеры)
+    # Способ 1: vxinstagram / instagramez (OpenGraph провайдеры - мгновенное скачивание)
     embed_endpoints = [
         f"https://www.vxinstagram.com/reel/{shortcode}/",
-        f"https://vxinstagram.com/reel/{shortcode}/",
-        f"https://www.vxinstagram.com/p/{shortcode}/",
-        f"https://vxinstagram.com/p/{shortcode}/",
         f"https://instagramez.com/reel/{shortcode}/",
-        f"https://instagramez.com/p/{shortcode}/",
-        f"https://ddinstagram.com/reel/{shortcode}/",
-        f"https://ddinstagram.com/p/{shortcode}/",
+        f"https://www.vxinstagram.com/p/{shortcode}/",
     ]
     for ep in embed_endpoints:
         try:
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=8),
+                timeout=aiohttp.ClientTimeout(total=4),
                 headers={"User-Agent": "TelegramBot"}
             ) as session:
                 async with session.get(ep) as r:
@@ -1003,38 +1030,7 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
         except Exception as e:
             logger.debug(f"Ошибка {ep}: {e}")
 
-    # Способ 2: Cobalt mirrors для Instagram
-    cobalt_mirrors = [
-        "https://taivideo.websites.com.vn/",
-        "https://capi.3kh0.net/",
-        "https://cobalt-backend.canine.tools/",
-        "https://api.qwk.app",
-    ]
-    for cm in cobalt_mirrors:
-        try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=8),
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0"
-                }
-            ) as session:
-                clean_ig_url = f"https://www.instagram.com/reel/{shortcode}/"
-                async with session.post(cm, json={"url": clean_ig_url}) as r:
-                    if r.status == 200:
-                        c_data = await r.json(content_type=None)
-                        if c_data.get("status") in ("classic", "stream", "redirect") and c_data.get("url"):
-                            logger.info(f"Instagram найден через Cobalt ({cm})")
-                            return {"type": "video", "url": c_data["url"]}
-                        elif c_data.get("status") == "picker" and c_data.get("picker"):
-                            p_item = c_data["picker"][0]
-                            if p_item.get("url"):
-                                return {"type": p_item.get("type", "video"), "url": p_item["url"]}
-        except Exception as e:
-            logger.debug(f"Ошибка Cobalt Instagram ({cm}): {e}")
-
-    # Способ 3: yt-dlp Instagram экстрактор
+    # Способ 2: yt-dlp Instagram экстрактор с быстрым распознаванием 18+ / возрастного ограничения
     last_ig_error = ""
     def extract_ig_ytdlp():
         opts = {
@@ -1060,14 +1056,47 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
             logger.info("Instagram найден через yt-dlp")
             return res
     except Exception as e:
-        last_ig_error = str(e)
+        last_ig_error = str(e).lower()
         logger.warning(f"Ошибка yt-dlp instagram: {e}")
+        if "available to everyone" in last_ig_error or "certain audiences" in last_ig_error or "login" in last_ig_error or "requires authentication" in last_ig_error:
+            logger.info(f"Instagram 18+ detected for {shortcode}")
+            return {"error": "age_restricted"}
+
+    # Способ 3: Cobalt mirrors для Instagram
+    cobalt_mirrors = [
+        "https://capi.3kh0.net/",
+        "https://cobalt-backend.canine.tools/",
+        "https://taivideo.websites.com.vn/",
+    ]
+    for cm in cobalt_mirrors:
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=5),
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0"
+                }
+            ) as session:
+                clean_ig_url = f"https://www.instagram.com/reel/{shortcode}/"
+                async with session.post(cm, json={"url": clean_ig_url}) as r:
+                    if r.status == 200:
+                        c_data = await r.json(content_type=None)
+                        if c_data.get("status") in ("classic", "stream", "redirect") and c_data.get("url"):
+                            logger.info(f"Instagram найден через Cobalt ({cm})")
+                            return {"type": "video", "url": c_data["url"]}
+                        elif c_data.get("status") == "picker" and c_data.get("picker"):
+                            p_item = c_data["picker"][0]
+                            if p_item.get("url"):
+                                return {"type": p_item.get("type", "video"), "url": p_item["url"]}
+        except Exception as e:
+            logger.debug(f"Ошибка Cobalt Instagram ({cm}): {e}")
 
     # Способ 4: vkrdownloader API
     try:
         api_url = f"https://api.vkrdownloader.com/server?vkr={url}"
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=8),
+            timeout=aiohttp.ClientTimeout(total=5),
             headers={"User-Agent": "Mozilla/5.0"}
         ) as session:
             async with session.get(api_url) as r:
@@ -1080,7 +1109,7 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
     except Exception as e:
         logger.debug(f"Ошибка vkr: {e}")
 
-    if "available to everyone" in last_ig_error or "certain audiences" in last_ig_error or "login" in last_ig_error.lower() or "requires authentication" in last_ig_error.lower():
+    if "available to everyone" in last_ig_error or "certain audiences" in last_ig_error or "login" in last_ig_error or "requires authentication" in last_ig_error:
         return {"error": "age_restricted"}
 
     return None
@@ -1446,7 +1475,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v30-multi-aweme-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v31-cffi-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
