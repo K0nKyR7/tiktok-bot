@@ -1298,20 +1298,38 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v17-tt-resilient | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v18-tt-debug | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
+        debug = {"url": url}
+        # 1. Test TikWM
         try:
-            data = await fetch_tiktok_data(url)
-            return web.json_response({
-                "status": "success" if data else "failed",
-                "title": data.get("title") if data else None,
-                "play": data.get("play") if data else None,
-                "error": data.get("error") if data else None
-            })
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
+                async with s.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1}) as r:
+                    debug["tikwm_status"] = r.status
+                    txt = await r.text()
+                    try:
+                        debug["tikwm_json"] = json.loads(txt)
+                    except Exception:
+                        debug["tikwm_raw"] = txt[:200]
         except Exception as e:
-            return web.json_response({"status": "error", "message": str(e)}, status=500)
+            debug["tikwm_err"] = str(e)
+
+        # 2. Test yt-dlp
+        try:
+            def ext():
+                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as y:
+                    return y.extract_info(url, download=False)
+            res = await asyncio.to_thread(ext)
+            debug["ytdlp_title"] = res.get("title")
+            debug["ytdlp_url"] = bool(res.get("url"))
+            debug["ytdlp_formats"] = len(res.get("formats", []))
+        except Exception as e:
+            debug["ytdlp_err"] = str(e)
+
+        return web.json_response(debug)
 
     async def handle_test_yt_audio(request):
         url = request.query.get("url", "https://youtu.be/rDskeI7Q58E")
