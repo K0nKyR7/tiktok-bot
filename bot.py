@@ -1475,7 +1475,7 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v32-inspect-cffi-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v33-cffi-inspect-live | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
@@ -1539,15 +1539,21 @@ async def start_health_check_server():
                 debug["aweme_inspect"]["err"] = repr(e)
 
         # 1.5 Direct cffi test
+        debug["cffi_test"] = {}
         try:
-            cffi_res = await asyncio.to_thread(fetch_tiktok_via_curl_cffi, url)
-            debug["cffi_test"] = {
-                "success": bool(cffi_res and (cffi_res.get("play") or cffi_res.get("images"))),
-                "title": cffi_res.get("title") if cffi_res else None,
-                "has_play": bool(cffi_res.get("play")) if cffi_res else False,
-            }
+            from curl_cffi import requests as cffi_req
+            debug["cffi_test"]["import_ok"] = True
+            encoded_url = urllib.parse.quote(url)
+            ep = f"https://www.tikwm.com/api/?url={encoded_url}&hd=1"
+            r = cffi_req.get(ep, impersonate="chrome120", timeout=10)
+            debug["cffi_test"]["status"] = r.status_code
+            debug["cffi_test"]["text_preview"] = r.text[:200]
+            if r.status_code == 200:
+                data = r.json()
+                debug["cffi_test"]["code"] = data.get("code")
+                debug["cffi_test"]["msg"] = data.get("msg")
         except Exception as e:
-            debug["cffi_test"] = {"err": repr(e)}
+            debug["cffi_test"]["err"] = repr(e)
 
         # 2. Test full fetch_tiktok_data function
         try:
