@@ -1411,83 +1411,88 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v21-tiktok-get-aweme-ig-cobalt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v22-test-multitt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
         debug = {"url": url}
 
-        # 1. TikWM GET request
+        # 0. Resolve redirect
+        video_id = None
         try:
-            encoded_url = urllib.parse.quote(url)
-            get_api = f"https://www.tikwm.com/api/?url={encoded_url}&hd=1"
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
-                async with s.get(get_api) as r:
-                    debug["tikwm_get_status"] = r.status
-                    if r.status == 200:
-                        t_json = await r.json(content_type=None)
-                        debug["tikwm_get_code"] = t_json.get("code")
-                        debug["tikwm_get_msg"] = t_json.get("msg")
-                        if t_json.get("data"):
-                            debug["tikwm_get_play"] = bool(t_json["data"].get("play"))
-                            debug["tikwm_get_title"] = t_json["data"].get("title")
-        except Exception as e:
-            debug["tikwm_get_err"] = str(e)
-
-        # 2. Tikmate API
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
-                async with s.post("https://api.tikmate.app/api/lookup", data={"url": url}) as r:
-                    debug["tikmate"] = {"status": r.status}
-                    if r.status == 200:
-                        debug["tikmate"]["data"] = await r.json(content_type=None)
-        except Exception as e:
-            debug["tikmate"] = {"err": str(e)}
-
-        # 3. Resolve redirect of vt.tiktok.com first
-        try:
-            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=5)) as s:
+            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=6)) as s:
                 async with s.get(url, allow_redirects=True) as r:
                     debug["redirect_url"] = str(r.url)
                     vid = str(r.url).split("/video/")[1].split("?")[0] if "/video/" in str(r.url) else None
                     debug["video_id"] = vid
+                    video_id = vid
         except Exception as e:
             debug["redirect_err"] = str(e)
 
-        # 4. Official TikTok aweme/v1/feed API using video_id
-        if debug.get("video_id"):
+        # 1. Test Cobalt mirrors for TikTok
+        cobalt_mirrors = [
+            "https://taivideo.websites.com.vn/",
+            "https://capi.3kh0.net/",
+            "https://cobalt-backend.canine.tools/",
+            "https://api.qwk.app",
+        ]
+        debug["cobalt"] = {}
+        for cm in cobalt_mirrors:
             try:
-                aweme_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={debug['video_id']}"
-                headers = {"User-Agent": "okhttp/3.10.0.1", "Accept-Encoding": "gzip"}
-                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
+                headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=6)) as s:
+                    async with s.post(cm, json={"url": url}) as r:
+                        debug["cobalt"][cm] = {"status": r.status}
+                        if r.status == 200:
+                            c_data = await r.json(content_type=None)
+                            debug["cobalt"][cm]["status_field"] = c_data.get("status")
+                            debug["cobalt"][cm]["url"] = bool(c_data.get("url"))
+            except Exception as e:
+                debug["cobalt"][cm] = {"err": str(e)}
+
+        # 2. Test VKRdownloader
+        try:
+            vkr_url = f"https://api.vkrdownloader.com/server?vkr={url}"
+            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=6)) as s:
+                async with s.get(vkr_url) as r:
+                    debug["vkr_status"] = r.status
+                    if r.status == 200:
+                        v_data = await r.json(content_type=None)
+                        debug["vkr_downloads"] = len(v_data.get("data", {}).get("downloads", []))
+        except Exception as e:
+            debug["vkr_err"] = str(e)
+
+        # 3. Test Aweme with full Android device query parameters
+        if video_id:
+            try:
+                ts = int(time.time())
+                aweme_url = (
+                    f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/"
+                    f"?aweme_id={video_id}&version_name=26.1.3&version_code=2613&build_number=26.1.3"
+                    f"&manifest_version_code=2613&update_version_code=2613&openudid=a1b2c3d4e5f60718"
+                    f"&uuid=1234567890123456&_rticket={ts*1000}&ts={ts}&device_brand=Google"
+                    f"&device_type=Pixel%207&device_platform=android&resolution=1080*2400&dpi=420"
+                    f"&os_version=13&os_api=33&carrier_region=US&sys_region=US&region=US"
+                    f"&app_name=musical_ly&app_language=en&language=en&timezone_name=America%2FNew_York"
+                    f"&timezone_offset=-14400&channel=googleplay&ac=wifi&mcc_mnc=310260&is_my_cn=0&aid=1233"
+                )
+                headers = {"User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)", "Accept-Encoding": "gzip"}
+                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=6)) as s:
                     async with s.get(aweme_url) as r:
-                        debug["aweme_status"] = r.status
+                        debug["aweme_full_status"] = r.status
                         if r.status == 200:
                             raw = await r.read()
                             if raw.startswith(b"\x1f\x8b"):
                                 raw = gzip.decompress(raw)
                             a_data = json.loads(raw.decode("utf-8", errors="ignore"))
-                            debug["aweme_keys"] = list(a_data.keys())
-                            if "aweme_list" in a_data:
-                                debug["aweme_list_len"] = len(a_data["aweme_list"])
-                                if a_data["aweme_list"]:
-                                    item = a_data["aweme_list"][0]
-                                    debug["item_keys"] = list(item.keys())
-                                    debug["desc"] = item.get("desc")
-                                    video_obj = item.get("video") or {}
-                                    play_addr = video_obj.get("play_addr") or {}
-                                    debug["play_urls"] = play_addr.get("url_list", [])[:2]
+                            aweme_list = a_data.get("aweme_list", [])
+                            debug["aweme_full_list_len"] = len(aweme_list)
+                            if aweme_list:
+                                debug["aweme_full_desc"] = aweme_list[0].get("desc")
+                                v_obj = aweme_list[0].get("video") or {}
+                                debug["aweme_full_play"] = bool(v_obj.get("play_addr", {}).get("url_list"))
             except Exception as e:
-                debug["aweme_err"] = str(e)
-
-        # 5. Full fetch_tiktok_data test
-        try:
-            tt_res = await fetch_tiktok_data(url)
-            debug["fetch_tiktok_data_success"] = bool(tt_res and (tt_res.get("play") or tt_res.get("images")))
-            debug["fetch_tiktok_data_title"] = tt_res.get("title") if tt_res else None
-        except Exception as e:
-            debug["fetch_tiktok_data_err"] = str(e)
+                debug["aweme_full_err"] = str(e)
 
         return web.json_response(debug)
 
