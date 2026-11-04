@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 import logging
 import os
 import re
@@ -153,32 +154,110 @@ def to_absolute_url(url: Optional[str]) -> Optional[str]:
 # 1. TIKTOK
 # ==========================================
 async def fetch_tiktok_data(url: str) -> Optional[dict]:
-    """Запрашивает данные видео через TikWM API (с ретраем при лимитах) + резерв yt-dlp."""
-    params = {"url": url, "count": 12, "cursor": 0, "web": 1, "hd": 1}
+    """Запрашивает данные видео через TikWM GET API + официальный Aweme Mobile API + yt-dlp."""
+    encoded_url = urllib.parse.quote(url)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
     }
 
-    hosts = ["https://www.tikwm.com/api/", "https://tikwm.com/api/"]
-    for host in hosts:
+    # Способ 1: TikWM API через GET (обходит WAF/блокировки Cloudflare для облачных серверов)
+    get_hosts = [
+        f"https://www.tikwm.com/api/?url={encoded_url}&hd=1",
+        f"https://tikwm.com/api/?url={encoded_url}&hd=1",
+    ]
+    for get_url in get_hosts:
         for attempt in range(2):
             try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers=headers) as session:
-                    async with session.post(host, data=params) as resp:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), headers=headers) as session:
+                    async with session.get(get_url) as resp:
                         if resp.status == 200:
                             data = await resp.json(content_type=None)
                             if data.get("code") == 0 and data.get("data"):
+                                logger.info(f"TikWM GET успешно получил данные для TikTok {url}")
                                 return data.get("data")
                             msg = data.get("msg") or ""
-                            logger.warning(f"TikWM ({host}) попытка {attempt+1}: {msg}")
+                            logger.warning(f"TikWM GET ({get_url}) попытка {attempt+1}: {msg}")
                             if "Free Api Limit" in msg or "1 request/second" in msg:
                                 await asyncio.sleep(1.2)
                                 continue
             except Exception as e:
-                logger.warning(f"Ошибка TikWM ({host}): {e}")
-                await asyncio.sleep(1)
+                logger.warning(f"Ошибка TikWM GET ({get_url}): {e}")
+                await asyncio.sleep(0.5)
 
-    # Резерв: yt-dlp
+    # Способ 2: Официальный мобильный API TikTok (Aweme Feed API)
+    try:
+        video_id = None
+        vid_match = re.search(r"/video/(\d+)", url) or re.search(r"(\d{15,22})", url)
+        if vid_match:
+            video_id = vid_match.group(1)
+        else:
+            # Разрешаем редиректы коротких ссылок (vt.tiktok.com, vm.tiktok.com)
+            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=6)) as s:
+                async with s.get(url, allow_redirects=True) as r:
+                    final_url = str(r.url)
+                    vid_match = re.search(r"/video/(\d+)", final_url) or re.search(r"(\d{15,22})", final_url)
+                    if vid_match:
+                        video_id = vid_match.group(1)
+
+        if video_id:
+            logger.info(f"Пробуем резервный TikTok Aweme Feed API для video_id={video_id}...")
+            aweme_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={video_id}"
+            aweme_headers = {
+                "User-Agent": "okhttp/3.10.0.1",
+                "Accept-Encoding": "gzip",
+            }
+            async with aiohttp.ClientSession(headers=aweme_headers, timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(aweme_url) as r:
+                    if r.status == 200:
+                        raw = await r.read()
+                        if raw.startswith(b"\x1f\x8b"):
+                            raw = gzip.decompress(raw)
+                        feed_json = json.loads(raw.decode("utf-8", errors="ignore"))
+                        aweme_list = feed_json.get("aweme_list", [])
+                        if aweme_list:
+                            item = aweme_list[0]
+                            desc = item.get("desc") or "TikTok video"
+
+                            # Фото-карусель
+                            images = []
+                            img_post = item.get("image_post_info")
+                            if img_post and img_post.get("images"):
+                                for img_obj in img_post.get("images", []):
+                                    d_img = img_obj.get("display_image", {})
+                                    u_list = d_img.get("url_list", [])
+                                    if u_list:
+                                        images.append(u_list[0])
+
+                            v_urls = item.get("video", {}).get("play_addr", {}).get("url_list", [])
+                            m_url = item.get("music", {}).get("play_url", {}).get("uri")
+                            if not m_url and item.get("music", {}).get("play_url", {}).get("url_list"):
+                                m_url = item.get("music", {})["play_url"]["url_list"][0]
+
+                            result = {
+                                "id": video_id,
+                                "title": desc,
+                                "play": v_urls[0] if v_urls else None,
+                                "hdplay": v_urls[-1] if len(v_urls) > 1 else (v_urls[0] if v_urls else None),
+                                "music": m_url or (v_urls[0] if v_urls else None),
+                                "music_info": {
+                                    "title": item.get("music", {}).get("title") or "Original Sound",
+                                    "author": item.get("music", {}).get("author") or "",
+                                    "play": m_url,
+                                },
+                                "author": {
+                                    "nickname": item.get("author", {}).get("nickname") or "",
+                                    "unique_id": item.get("author", {}).get("unique_id") or "",
+                                }
+                            }
+                            if images:
+                                result["images"] = images
+                            logger.info(f"TikTok Aweme Feed API успешно получил видео {video_id}")
+                            return result
+    except Exception as e:
+        logger.warning(f"Ошибка Aweme API fallback: {e}")
+
+    # Способ 3: Резерв через yt-dlp
     logger.info("Пробуем резервное получение TikTok через yt-dlp...")
     try:
         def extract_tt():
@@ -849,15 +928,18 @@ def download_pinterest_media(url: str, output_dir: str) -> dict:
 # 4. INSTAGRAM (vxinstagram + yt-dlp + vkr)
 # ==========================================
 async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
-    """Скачивание Instagram Reels / публикаций через надежные мульти-провайдеры."""
+    """Скачивание Instagram Reels / публикаций через мульти-провайдеры (vxinstagram, Cobalt, yt-dlp, vkr)."""
 
-    # Способ 1: ddinstagram / vxinstagram (OpenGraph провайдеры)
+    # Способ 1: vxinstagram / instagramez / ddinstagram (OpenGraph провайдеры)
     embed_endpoints = [
-        f"https://www.ddinstagram.com/reel/{shortcode}/",
-        f"https://ddinstagram.com/reel/{shortcode}/",
         f"https://www.vxinstagram.com/reel/{shortcode}/",
-        f"https://www.ddinstagram.com/p/{shortcode}/",
+        f"https://vxinstagram.com/reel/{shortcode}/",
         f"https://www.vxinstagram.com/p/{shortcode}/",
+        f"https://vxinstagram.com/p/{shortcode}/",
+        f"https://instagramez.com/reel/{shortcode}/",
+        f"https://instagramez.com/p/{shortcode}/",
+        f"https://ddinstagram.com/reel/{shortcode}/",
+        f"https://ddinstagram.com/p/{shortcode}/",
     ]
     for ep in embed_endpoints:
         try:
@@ -886,7 +968,38 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
         except Exception as e:
             logger.debug(f"Ошибка {ep}: {e}")
 
-    # Способ 2: yt-dlp Instagram экстрактор
+    # Способ 2: Cobalt mirrors для Instagram
+    cobalt_mirrors = [
+        "https://taivideo.websites.com.vn/",
+        "https://capi.3kh0.net/",
+        "https://cobalt-backend.canine.tools/",
+        "https://api.qwk.app",
+    ]
+    for cm in cobalt_mirrors:
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8),
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0"
+                }
+            ) as session:
+                clean_ig_url = f"https://www.instagram.com/reel/{shortcode}/"
+                async with session.post(cm, json={"url": clean_ig_url}) as r:
+                    if r.status == 200:
+                        c_data = await r.json(content_type=None)
+                        if c_data.get("status") in ("classic", "stream", "redirect") and c_data.get("url"):
+                            logger.info(f"Instagram найден через Cobalt ({cm})")
+                            return {"type": "video", "url": c_data["url"]}
+                        elif c_data.get("status") == "picker" and c_data.get("picker"):
+                            p_item = c_data["picker"][0]
+                            if p_item.get("url"):
+                                return {"type": p_item.get("type", "video"), "url": p_item["url"]}
+        except Exception as e:
+            logger.debug(f"Ошибка Cobalt Instagram ({cm}): {e}")
+
+    # Способ 3: yt-dlp Instagram экстрактор
     last_ig_error = ""
     def extract_ig_ytdlp():
         opts = {
@@ -915,7 +1028,7 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
         last_ig_error = str(e)
         logger.warning(f"Ошибка yt-dlp instagram: {e}")
 
-    # Способ 3: vkrdownloader API
+    # Способ 4: vkrdownloader API
     try:
         api_url = f"https://api.vkrdownloader.com/server?vkr={url}"
         async with aiohttp.ClientSession(
@@ -932,7 +1045,7 @@ async def fetch_instagram_media(url: str, shortcode: str) -> Optional[dict]:
     except Exception as e:
         logger.debug(f"Ошибка vkr: {e}")
 
-    if "available to everyone" in last_ig_error or "certain audiences" in last_ig_error or "login" in last_ig_error.lower():
+    if "available to everyone" in last_ig_error or "certain audiences" in last_ig_error or "login" in last_ig_error.lower() or "requires authentication" in last_ig_error.lower():
         return {"error": "age_restricted"}
 
     return None
@@ -1298,31 +1411,29 @@ async def start_health_check_server():
         c_size = os.path.getsize(cookie_path) if c_exists else 0
         deno_ok = bool(shutil.which("deno"))
         ffmpeg_ok = bool(get_ffmpeg_path())
-        return web.Response(text=f"Bot v20-debug-all | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
+        return web.Response(text=f"Bot v21-tiktok-get-aweme-ig-cobalt | deno: {deno_ok} | ffmpeg: {ffmpeg_ok} | cookies: {c_exists} ({c_size}b)")
 
     async def handle_test_tt(request):
         url = request.query.get("url", "https://vt.tiktok.com/ZSpLa6XT8/")
         debug = {"url": url}
 
-        # 1. TikWM with different User-Agents
-        uas = [
-            "okhttp/3.14.9",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-            "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7; Build/TQ3A.230901.001; Cronet/58.0.2991.0)"
-        ]
-        for ua in uas:
-            try:
-                headers = {"User-Agent": ua, "Accept": "*/*"}
-                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as s:
-                    async with s.post("https://www.tikwm.com/api/", data={"url": url, "hd": 1}) as r:
-                        tag = ua.split("/")[0]
-                        debug[f"tikwm_{tag}"] = {"status": r.status}
-                        if r.status == 200:
-                            data = await r.json(content_type=None)
-                            debug[f"tikwm_{tag}"]["code"] = data.get("code")
-                            debug[f"tikwm_{tag}"]["msg"] = data.get("msg")
-            except Exception as e:
-                debug[f"tikwm_{ua[:10]}"] = {"err": str(e)}
+        # 1. TikWM GET request
+        try:
+            encoded_url = urllib.parse.quote(url)
+            get_api = f"https://www.tikwm.com/api/?url={encoded_url}&hd=1"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
+                async with s.get(get_api) as r:
+                    debug["tikwm_get_status"] = r.status
+                    if r.status == 200:
+                        t_json = await r.json(content_type=None)
+                        debug["tikwm_get_code"] = t_json.get("code")
+                        debug["tikwm_get_msg"] = t_json.get("msg")
+                        if t_json.get("data"):
+                            debug["tikwm_get_play"] = bool(t_json["data"].get("play"))
+                            debug["tikwm_get_title"] = t_json["data"].get("title")
+        except Exception as e:
+            debug["tikwm_get_err"] = str(e)
 
         # 2. Tikmate API
         try:
@@ -1348,12 +1459,15 @@ async def start_health_check_server():
         if debug.get("video_id"):
             try:
                 aweme_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={debug['video_id']}"
-                headers = {"User-Agent": "com.zhiliaoapp.musically/2022600030 (Linux; U; Android 13; en_US; Pixel 7)"}
-                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as s:
+                headers = {"User-Agent": "okhttp/3.10.0.1", "Accept-Encoding": "gzip"}
+                async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as s:
                     async with s.get(aweme_url) as r:
                         debug["aweme_status"] = r.status
                         if r.status == 200:
-                            a_data = await r.json(content_type=None)
+                            raw = await r.read()
+                            if raw.startswith(b"\x1f\x8b"):
+                                raw = gzip.decompress(raw)
+                            a_data = json.loads(raw.decode("utf-8", errors="ignore"))
                             debug["aweme_keys"] = list(a_data.keys())
                             if "aweme_list" in a_data:
                                 debug["aweme_list_len"] = len(a_data["aweme_list"])
@@ -1366,6 +1480,14 @@ async def start_health_check_server():
                                     debug["play_urls"] = play_addr.get("url_list", [])[:2]
             except Exception as e:
                 debug["aweme_err"] = str(e)
+
+        # 5. Full fetch_tiktok_data test
+        try:
+            tt_res = await fetch_tiktok_data(url)
+            debug["fetch_tiktok_data_success"] = bool(tt_res and (tt_res.get("play") or tt_res.get("images")))
+            debug["fetch_tiktok_data_title"] = tt_res.get("title") if tt_res else None
+        except Exception as e:
+            debug["fetch_tiktok_data_err"] = str(e)
 
         return web.json_response(debug)
 
@@ -1418,17 +1540,6 @@ async def start_health_check_server():
         shortcode = m.group(1) if m else "DfI91GEqDeK"
         debug = {"url": url, "shortcode": shortcode}
 
-        # Test ddinstagram
-        try:
-            async with aiohttp.ClientSession(headers={"User-Agent": "TelegramBot"}) as s:
-                async with s.get(f"https://www.ddinstagram.com/reel/{shortcode}/") as r:
-                    debug["ddinstagram_status"] = r.status
-                    txt = await r.text()
-                    vm = re.search(r'<meta property=[\x22\x27]og:video(?::secure_url)?[\x22\x27] content=[\x22\x27]([^\x22\x27]+)[\x22\x27]', txt)
-                    debug["ddinstagram_video"] = vm.group(1) if vm else None
-        except Exception as e:
-            debug["ddinstagram_err"] = str(e)
-
         # Test vxinstagram
         try:
             async with aiohttp.ClientSession(headers={"User-Agent": "TelegramBot"}) as s:
@@ -1448,8 +1559,17 @@ async def start_health_check_server():
             res = await asyncio.to_thread(ext_ig)
             debug["ytdlp_title"] = res.get("title")
             debug["ytdlp_url"] = bool(res.get("url"))
+            debug["ytdlp_formats"] = len(res.get("formats", []))
         except Exception as e:
             debug["ytdlp_err"] = str(e)
+
+        # Test full fetch_instagram_media
+        try:
+            ig_res = await fetch_instagram_media(url, shortcode)
+            debug["fetch_instagram_media_res"] = ig_res
+            debug["fetch_instagram_media_success"] = bool(ig_res and ig_res.get("url"))
+        except Exception as e:
+            debug["fetch_instagram_media_err"] = str(e)
 
         return web.json_response(debug)
 
